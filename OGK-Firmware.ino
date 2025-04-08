@@ -291,17 +291,22 @@ void dataOutput() {
   // MAYBE ONLY START TASK IF OUTPUT IS ENABLED?
   if (conf.ser_output) {
     if (Serial || Serial2) {
+      String outputData = "";
       if (conf.print_spectrum) {
         for (uint16_t index = 0; index < ADC_BINS; index++) {
-          cleanPrint(String(spectrum[index]) + ";");
+          outputData += String(spectrum[index]) + ",";
+          //cleanPrint(String(spectrum[index]) + ";");
           //spectrum[index] = 0; // Uncomment for differential histogram
         }
-        cleanPrintln();
+        cleanPrintln("[" + outputData + "]");
+        outputData = "";
       } else if (event_position > 0 && event_position <= EVENT_BUFFER) {
         for (uint16_t index = 0; index < event_position; index++) {
-          cleanPrint(String(events[index]) + ";");
+          //cleanPrint(String(events[index]) + ";");
+          outputData += String(events[index]) + ",";
         }
-        cleanPrintln();
+        cleanPrintln("[" + outputData + "]");
+        outputData = "";
       }
     }
 
