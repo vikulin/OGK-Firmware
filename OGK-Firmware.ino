@@ -82,7 +82,7 @@ struct Config {
     =================
 */
 
-const String FW_VERSION = "4.3.2";  // Firmware Version Code
+const String FW_VERSION = "1.0.0";  // Firmware Version Code
 
 const uint8_t GND_PIN = A2;    // GND meas pin
 const uint8_t VSYS_MEAS = A3;  // VSYS/3
@@ -692,8 +692,8 @@ void deviceInfo([[maybe_unused]] String *args) {
   println("-- Open Gamma Kit Firmware --");
   println("By Vadym Vikulin, Open Gamma Kit");
   println("2025. https://github.com/vikulin/OpenGammaKit");
-  println("Firmware Version| " + FW_VERSION);
   println("=========================");
+  println("Firmware Version| " + FW_VERSION);
   println("Runtime| \t\t" + String(millis() / 1000.0) + " s");
   print("Last reset reason| \t");
 
