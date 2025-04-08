@@ -9,6 +9,15 @@
 
 #include "Helper.h"
 
+void end(){
+  if (Serial) {
+    Serial.println('\0');
+  }
+  if (Serial2) {
+    Serial2.println('\0');
+  }
+}
+
 void cleanPrintln(const String &text) {
   if (Serial) {
     Serial.println(text);

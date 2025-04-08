@@ -14,6 +14,7 @@
 
 const String RESET_REASON_TEXT[8] = { "unknown", "power-on", "run pin", "software", "watchdog", "debug", "glitch", "brownout" };
 
+void end()
 void cleanPrintln(const String &text = String(""));
 void cleanPrintln(unsigned int number, int base = DEC);
 void cleanPrint(const String &text = String(""));

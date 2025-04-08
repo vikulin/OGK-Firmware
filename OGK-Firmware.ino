@@ -724,6 +724,7 @@ void deviceInfo([[maybe_unused]] String *args) {
 
   print("Power-on hours: \t");
   cleanPrintln((power_on == 0) ? "n/a" : String(power_on));
+  end();
 }
 
 
