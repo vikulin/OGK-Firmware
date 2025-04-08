@@ -689,40 +689,40 @@ void deviceInfo([[maybe_unused]] String *args) {
   debugFile.close();
 
   println("=========================");
-  println("-- Open Gamma Detector --");
-  println("By NuclearPhoenix, Open Gamma Project");
-  println("2024. https://github.com/OpenGammaProject");
-  println("Firmware Version: " + FW_VERSION);
+  println("-- Open Gamma Kit Firmware --");
+  println("By Vadym Vikulin, Open Gamma Kit");
+  println("2025. https://github.com/vikulin/OpenGammaKit");
+  println("Firmware Version| " + FW_VERSION);
   println("=========================");
-  println("Runtime: \t\t" + String(millis() / 1000.0) + " s");
-  print("Last reset reason: \t");
+  println("Runtime| \t\t" + String(millis() / 1000.0) + " s");
+  print("Last reset reason| \t");
 
   cleanPrintln(RESET_REASON_TEXT[rp2040.getResetReason()]);  // Get reset reason text
 
-  print("Average Dead Time: \t");
+  print("Average Dead Time| \t");
 
   cleanPrintln((total_events == 0) ? "n/a" : String(round(avg_dt), 0) + " µs");
 
   const float deadtime_frac = avg_dt * total_events / 1000.0 / float(millis()) * 100.0;
 
-  print("Total Dead Time: \t");
+  print("Total Dead Time| \t");
   cleanPrintln(isnan(deadtime_frac) ? "n/a" : String(deadtime_frac) + " %");
 
-  println("Total Pulses: \t" + String(total_events));
-  println("CPU Frequency: \t" + String(rp2040.f_cpu() / 1e6) + " MHz");
-  println("Used Heap Memory: \t" + String(rp2040.getUsedHeap() / 1000.0) + " kB / " + String(rp2040.getUsedHeap() * 100.0 / rp2040.getTotalHeap(), 0) + "%");
-  println("Free Heap Memory: \t" + String(rp2040.getFreeHeap() / 1000.0) + " kB / " + String(rp2040.getFreeHeap() * 100.0 / rp2040.getTotalHeap(), 0) + "%");
-  println("Temperature: \t" + String(round(readTemp() * 10.0) / 10.0, 1) + " °C");
-  println("USB Connection: \t" + String(digitalRead(VBUS_MEAS)));
+  println("Total Pulses| \t" + String(total_events));
+  println("CPU Frequency| \t" + String(rp2040.f_cpu() / 1e6) + " MHz");
+  println("Used Heap Memory| \t" + String(rp2040.getUsedHeap() / 1000.0) + " kB / " + String(rp2040.getUsedHeap() * 100.0 / rp2040.getTotalHeap(), 0) + "%");
+  println("Free Heap Memory| \t" + String(rp2040.getFreeHeap() / 1000.0) + " kB / " + String(rp2040.getFreeHeap() * 100.0 / rp2040.getTotalHeap(), 0) + "%");
+  println("Temperature| \t" + String(round(readTemp() * 10.0) / 10.0, 1) + " °C");
+  println("USB Connection| \t" + String(digitalRead(VBUS_MEAS)));
 
   const float v = 3.0 * analogRead(VSYS_MEAS) * VREF_VOLTAGE / (ADC_BINS - 1);
 
-  println("Supply Voltage: \t" + String(round(v * 10.0) / 10.0, 1) + " V");
+  println("Supply Voltage| \t" + String(round(v * 10.0) / 10.0, 1) + " V");
 
-  print("Power Cycle Count: \t");
+  print("Power Cycle Count| \t");
   cleanPrintln((power_cycle == 0) ? "n/a" : String(power_cycle));
 
-  print("Power-on hours: \t");
+  print("Power-on hours| \t");
   cleanPrintln((power_on == 0) ? "n/a" : String(power_on));
   end();
 }
