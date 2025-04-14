@@ -47,7 +47,6 @@
 #define SCREEN_WIDTH 128            // OLED display width, in pixels
 #define SCREEN_HEIGHT 64            // OLED display height, in pixels
 #define SCREEN_ADDRESS 0x3C         // See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
-#define EVENT_BUFFER 50000          // Buffer this many events for Serial.print
 #define BASELINE_NUM 101            // Number of measurements taken to determine the DC baseline
 #define CONFIG_FILE "/config.json"  // File to store the settings
 #define DEBUG_FILE "/debug.json"    // File to store some misc debug info
@@ -82,7 +81,7 @@ struct Config {
     =================
 */
 
-const String FW_VERSION = "1.0.1";  // Firmware Version Code
+const String FW_VERSION = "1.1.0";  // Firmware Version Code
 
 const uint8_t GND_PIN = A2;    // GND meas pin
 const uint8_t VSYS_MEAS = A3;  // VSYS/3
@@ -110,8 +109,6 @@ const uint16_t ADC_BINS = 0x01 << ADC_RES;  // Number of ADC bins
 volatile uint32_t spectrum[ADC_BINS];          // Holds the output histogram (spectrum)
 volatile uint32_t display_spectrum[ADC_BINS];  // Holds the display histogram (spectrum)
 
-volatile uint16_t events[EVENT_BUFFER];  // Buffer array for single events
-volatile uint32_t event_position = 0;    // Target index in events array
 volatile unsigned long start_time = 0;   // Time in ms when the spectrum collection has started
 volatile unsigned long last_time = 0;    // Last time the display has been refreshed
 volatile uint32_t last_total = 0;        // Last total pulse count for display
@@ -257,7 +254,6 @@ void queryButton() {
           Short Press: Switch Modes
         */
         conf.geiger_mode = !conf.geiger_mode;
-        event_position = 0;
         clearSpectrum();
         clearSpectrumDisplay();
         resetSampleHold();
@@ -300,17 +296,35 @@ void dataOutput() {
         }
         cleanPrintln("[" + outputData + "]");
         outputData = "";
-      } else if (event_position > 0 && event_position <= EVENT_BUFFER) {
-        for (uint16_t index = 0; index < event_position; index++) {
-          //cleanPrint(String(events[index]) + ";");
-          outputData += String(events[index]) + ",";
+      } else {
+        uint32_t total = 0;
+
+        for (uint16_t i = 0; i < ADC_BINS; i++) {
+            total += display_spectrum[i];
         }
-        cleanPrintln("[" + outputData + "]");
-        outputData = "";
+
+        const unsigned long now_time = millis();
+        const uint32_t new_total = total - last_total;
+        last_total = total;
+
+        if (now_time < last_time) {  // Catch Millis() Rollover
+            last_time = now_time;
+            return;
+        }
+
+        unsigned long time_delta = now_time - last_time;
+        last_time = now_time;
+
+        if (time_delta == 0) {  // Avoid divide by zero
+            time_delta = 1000;
+        }
+
+        if (total > EVT_RESET_C) {
+            clearSpectrumDisplay();
+        }
+        cleanPrintln("[" + String(new_total) + "]");
       }
     }
-
-    event_position = 0;
   }
 
   // MAYBE SEPARATE TRNG AND SERIAL OUTPUT TASKS?
@@ -496,15 +510,15 @@ void recordStatus([[maybe_unused]] String *args) {
 
   const float runTime = (millis() - recordingStartTime) / 1000.0 / 60.0;
 
-  println("Recording Status: \tRunning...");
-  print("Recording File: \t");
+  println("Recording Status:Running...");
+  print("Recording File:");
   cleanPrintln(recordingFile);
-  print("Recording Time: \t");
+  print("Recording Time:");
   cleanPrint(runTime);
   cleanPrint(" / ");
   cleanPrint(recordingDuration);
   cleanPrintln(" minutes");
-  print("Progress: \t\t");
+  print("Progress:\t");
   cleanPrint(runTime / recordingDuration * 100.0);
   cleanPrintln(" %");
 }
@@ -601,11 +615,9 @@ void setMode(String *args) {
 
   if (command == "geiger") {
     conf.geiger_mode = true;
-    event_position = 0;
     println("Enabled geiger mode.");
   } else if (command == "energy") {
     conf.geiger_mode = false;
-    event_position = 0;
     println("Enabled energy measuring mode.");
   } else {
     println("Invalid input '" + command + "'.", true);
@@ -689,41 +701,43 @@ void deviceInfo([[maybe_unused]] String *args) {
   debugFile.close();
 
   println("=========================");
-  println("Product|Open Gamma Kit");
+  println("Product name|Open Gamma Kit");
   println("Firmware Version|" + FW_VERSION);
   println("Developer|Vadym Vikulin");
   println("Repository|https://github.com/vikulin/OpenGammaKit");
   println("=========================");
 
-  println("Runtime| \t\t" + String(millis() / 1000.0) + " s");
-  println("Last reset reason| \t");
+  println("Short product name|OGK");
+
+  println("Runtime|" + String(millis() / 1000.0) + " s");
+  println("Last reset reason|");
 
   cleanPrintln(RESET_REASON_TEXT[rp2040.getResetReason()]);  // Get reset reason text
 
-  print("Average Dead Time| \t");
+  print("Average Dead Time|");
 
   cleanPrintln((total_events == 0) ? "n/a" : String(round(avg_dt), 0) + " µs");
 
   const float deadtime_frac = avg_dt * total_events / 1000.0 / float(millis()) * 100.0;
 
-  print("Total Dead Time| \t");
+  print("Total Dead Time|");
   cleanPrintln(isnan(deadtime_frac) ? "n/a" : String(deadtime_frac) + " %");
 
-  println("Total Pulses| \t" + String(total_events));
-  println("CPU Frequency| \t" + String(rp2040.f_cpu() / 1e6) + " MHz");
-  println("Used Heap Memory| \t" + String(rp2040.getUsedHeap() / 1000.0) + " kB / " + String(rp2040.getUsedHeap() * 100.0 / rp2040.getTotalHeap(), 0) + "%");
-  println("Free Heap Memory| \t" + String(rp2040.getFreeHeap() / 1000.0) + " kB / " + String(rp2040.getFreeHeap() * 100.0 / rp2040.getTotalHeap(), 0) + "%");
-  println("Temperature| \t" + String(round(readTemp() * 10.0) / 10.0, 1) + " °C");
-  println("USB Connection| \t" + String(digitalRead(VBUS_MEAS)));
+  println("Total Pulses|" + String(total_events));
+  println("CPU Frequency|" + String(rp2040.f_cpu() / 1e6) + " MHz");
+  println("Used Heap Memory|" + String(rp2040.getUsedHeap() / 1000.0) + " kB / " + String(rp2040.getUsedHeap() * 100.0 / rp2040.getTotalHeap(), 0) + "%");
+  println("Free Heap Memory|" + String(rp2040.getFreeHeap() / 1000.0) + " kB / " + String(rp2040.getFreeHeap() * 100.0 / rp2040.getTotalHeap(), 0) + "%");
+  println("Temperature|" + String(round(readTemp() * 10.0) / 10.0, 1) + " °C");
+  println("USB Connection|" + String(digitalRead(VBUS_MEAS)));
 
   const float v = 3.0 * analogRead(VSYS_MEAS) * VREF_VOLTAGE / (ADC_BINS - 1);
 
-  println("Supply Voltage| \t" + String(round(v * 10.0) / 10.0, 1) + " V");
+  println("Supply Voltage|" + String(round(v * 10.0) / 10.0, 1) + " V");
 
-  print("Power Cycle Count| \t");
+  print("Power Cycle Count|");
   cleanPrintln((power_cycle == 0) ? "n/a" : String(power_cycle));
 
-  print("Power-on hours| \t");
+  print("Power-on hours|");
   cleanPrintln((power_on == 0) ? "n/a" : String(power_on));
   end();
 }
@@ -1224,14 +1238,8 @@ void eventInt() {
   }
 
   if ((conf.ser_output || conf.enable_display || isRecording)) {
-    events[event_position] = mean;
     spectrum[mean] += 1;
     display_spectrum[mean] += 1;
-    if (event_position >= EVENT_BUFFER - 1) {  // Increment if memory available, else overwrite array
-      event_position = 0;
-    } else {
-      event_position++;
-    }
   }
 
   if (conf.enable_trng) {
