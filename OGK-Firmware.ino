@@ -700,27 +700,20 @@ void deviceInfo([[maybe_unused]] String *args) {
 
   debugFile.close();
 
-  println("=========================");
+  /*This is JSON format output block*/
+  cleanPrintln("[");
   println("Product name|Open Gamma Kit");
   println("Firmware Version|" + FW_VERSION);
   println("Developer|Vadym Vikulin");
   println("Repository|https://github.com/vikulin/OpenGammaKit");
-  println("=========================");
-
   println("Short product name|OGK");
-
   println("Runtime|" + String(millis() / 1000.0) + " s");
   println("Last reset reason|"+RESET_REASON_TEXT[rp2040.getResetReason()]);
-
-  print("Average Dead Time|");
-
-  cleanPrintln((total_events == 0) ? "n/a" : String(round(avg_dt), 0) + " µs");
+  println("Average Dead Time|"+((total_events == 0) ? "n/a" : String(round(avg_dt), 0) + " µs"));
 
   const float deadtime_frac = avg_dt * total_events / 1000.0 / float(millis()) * 100.0;
 
-  print("Total Dead Time|");
-  cleanPrintln(isnan(deadtime_frac) ? "n/a" : String(deadtime_frac) + " %");
-
+  println("Total Dead Time|"+(isnan(deadtime_frac) ? "n/a" : String(deadtime_frac) + " %"));
   println("Total Pulses|" + String(total_events));
   println("CPU Frequency|" + String(rp2040.f_cpu() / 1e6) + " MHz");
   println("Used Heap Memory|" + String(rp2040.getUsedHeap() / 1000.0) + " kB / " + String(rp2040.getUsedHeap() * 100.0 / rp2040.getTotalHeap(), 0) + "%");
@@ -731,12 +724,11 @@ void deviceInfo([[maybe_unused]] String *args) {
   const float v = 3.0 * analogRead(VSYS_MEAS) * VREF_VOLTAGE / (ADC_BINS - 1);
 
   println("Supply Voltage|" + String(round(v * 10.0) / 10.0, 1) + " V");
+  println("Power Cycle Count|"+((power_cycle == 0) ? "n/a" : String(power_cycle)));
+  println("Power-on hours|"+((power_on == 0) ? "n/a" : String(power_on)));
 
-  print("Power Cycle Count|");
-  cleanPrintln((power_cycle == 0) ? "n/a" : String(power_cycle));
+  cleanPrintln("]");
 
-  print("Power-on hours|");
-  cleanPrintln((power_on == 0) ? "n/a" : String(power_on));
   end();
 }
 

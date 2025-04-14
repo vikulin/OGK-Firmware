@@ -59,7 +59,7 @@ void cleanPrint(unsigned int number, int base) {
 
 
 void print(String text, bool error) {
-  text = (error ? "[!] " : "[#] ") + text;
+  text = "\"" + text + "\",";
 
   if (Serial) {
     Serial.print(text);
@@ -76,7 +76,7 @@ void print(unsigned int number, bool error) {
 
 
 void println(String text, bool error) {
-  text = (error ? "[!] " : "[#] ") + text;
+  text = "\"" + text + "\",";
 
   if (Serial) {
     Serial.println(text);
