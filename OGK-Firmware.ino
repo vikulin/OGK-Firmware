@@ -710,9 +710,7 @@ void deviceInfo([[maybe_unused]] String *args) {
   println("Short product name|OGK");
 
   println("Runtime|" + String(millis() / 1000.0) + " s");
-  println("Last reset reason|");
-
-  cleanPrintln(RESET_REASON_TEXT[rp2040.getResetReason()]);  // Get reset reason text
+  println("Last reset reason|"+RESET_REASON_TEXT[rp2040.getResetReason()]);
 
   print("Average Dead Time|");
 
