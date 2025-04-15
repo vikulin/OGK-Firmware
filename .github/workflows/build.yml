@@ -47,7 +47,7 @@ jobs:
       - name: Compile Sketch
         run: |
           mkdir -p build
-          ./bin/arduino-cli compile --fqbn rp2040:rp2040:rpipico2 OGK-Firmware.ino --output-dir build --build-property build.flash_size=4MB
+          ./bin/arduino-cli compile --fqbn rp2040:rp2040:rpipico2 OGK-Firmware.ino --verbose --output-dir build --build-property build.flash_size=4MB
           echo "Searching for .uf2 file in build directory..."
           echo "==> Listing root folder contents:"
           ls -R .
