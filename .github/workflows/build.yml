@@ -1,0 +1,76 @@
+name: Build RP Pico 2 Sketch
+
+on:
+  push:
+    tags:
+      - '*'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Install Arduino CLI
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
+
+      - name: Setup Arduino CLI
+        run: |
+          ./bin/arduino-cli core update-index      
+      
+      - name: Configure Arduino CLI for Earle Philhower's RP2040 core
+        run: |
+          ./bin/arduino-cli config init --overwrite
+          ./bin/arduino-cli config add board_manager.additional_urls https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json
+          ./bin/arduino-cli core update-index
+          ./bin/arduino-cli core install rp2040:rp2040
+
+      - name: Install Arduino Libraries from GitHub
+        run: |
+          ARDUINO_LIBRARY_ENABLE_UNSAFE_INSTALL=true ./bin/arduino-cli lib install --git-url https://github.com/arkhipenko/TaskScheduler
+          ARDUINO_LIBRARY_ENABLE_UNSAFE_INSTALL=true ./bin/arduino-cli lib install --git-url https://github.com/NuclearPhoenixx/SimpleShell
+          ARDUINO_LIBRARY_ENABLE_UNSAFE_INSTALL=true ./bin/arduino-cli lib install --git-url https://github.com/jonnieZG/LinkedPointerList.git
+          ARDUINO_LIBRARY_ENABLE_UNSAFE_INSTALL=true ./bin/arduino-cli lib install --git-url https://github.com/bblanchon/ArduinoJson
+          ARDUINO_LIBRARY_ENABLE_UNSAFE_INSTALL=true ./bin/arduino-cli lib install --git-url https://github.com/adafruit/Adafruit_SSD1306
+          ARDUINO_LIBRARY_ENABLE_UNSAFE_INSTALL=true ./bin/arduino-cli lib install --git-url https://github.com/adafruit/Adafruit_SH110X
+          ARDUINO_LIBRARY_ENABLE_UNSAFE_INSTALL=true ./bin/arduino-cli lib install --git-url https://github.com/RobTillaart/RunningMedian
+          ARDUINO_LIBRARY_ENABLE_UNSAFE_INSTALL=true ./bin/arduino-cli lib install --git-url https://github.com/adafruit/Adafruit-GFX-Library.git
+          ARDUINO_LIBRARY_ENABLE_UNSAFE_INSTALL=true ./bin/arduino-cli lib install --git-url https://github.com/adafruit/Adafruit_BusIO.git
+
+      - name: Compile Sketch
+        run: |
+          mkdir -p build
+          ./bin/arduino-cli compile --fqbn rp2040:rp2040:rpipico2 OGK-Firmware.ino --output-dir build --build-property build.flash_size=4MB
+          echo "Searching for .uf2 file in build directory..."
+          echo "==> Listing root folder contents:"
+          ls -R .
+          find build -name '*.uf2' -print
+          UF2_FILE=$(find build -name '*.uf2' | head -n 1)
+          echo "Found UF2 file: $UF2_FILE"
+          mv "$UF2_FILE" build/ogk-firmware-${{ github.ref_name }}.uf2
+          
+      - name: Upload Firmware Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ogk-firmware-${{ github.ref_name }}.uf2
+          path: build/ogk-firmware-${{ github.ref_name }}.uf2
+
+      - name: Create GitHub Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Release ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          body: |
+            🚀 Release: **${{ github.ref_name }}**
+
+            ## Changes
+            $(git log -1 --pretty=format:"%h - %s%n%n%b")
+          files: build/ogk-firmware-${{ github.ref_name }}.uf2
