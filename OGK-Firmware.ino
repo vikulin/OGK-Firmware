@@ -81,7 +81,7 @@ struct Config {
     =================
 */
 
-const String FW_VERSION = "1.1.0";  // Firmware Version Code
+const String FW_VERSION = "1.1.1";  // Firmware Version Code
 
 const uint8_t GND_PIN = A2;    // GND meas pin
 const uint8_t VSYS_MEAS = A3;  // VSYS/3
@@ -291,7 +291,6 @@ void dataOutput() {
       if (conf.print_spectrum) {
         for (uint16_t index = 0; index < ADC_BINS; index++) {
           outputData += String(spectrum[index]) + ",";
-          //cleanPrint(String(spectrum[index]) + ";");
           //spectrum[index] = 0; // Uncomment for differential histogram
         }
         cleanPrintln("[" + outputData + "]");
@@ -303,21 +302,8 @@ void dataOutput() {
             total += display_spectrum[i];
         }
 
-        const unsigned long now_time = millis();
         const uint32_t new_total = total - last_total;
         last_total = total;
-
-        if (now_time < last_time) {  // Catch Millis() Rollover
-            last_time = now_time;
-            return;
-        }
-
-        unsigned long time_delta = now_time - last_time;
-        last_time = now_time;
-
-        if (time_delta == 0) {  // Avoid divide by zero
-            time_delta = 1000;
-        }
 
         if (total > EVT_RESET_C) {
             clearSpectrumDisplay();
