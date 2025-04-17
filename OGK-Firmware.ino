@@ -1,13 +1,13 @@
 /*
 
-  Open Gamma Detector Sketch
+  OpenGammaKit Sketch
   Only works on the Raspberry Pi Pico 2 (!) with arduino-pico!
 
   Triggers on newly detected pulses and measures their energy.
 
-  2024, NuclearPhoenix. Open Gamma Project.
+  2025, NuclearPhoenix and Vadym Vikulin. OpenGammaKit.
   https://github.com/OpenGammaProject/Open-Gamma-Detector
-
+  https://github.com/Vikulin/OpenGammaKit
   ## NOTE:
   ## Only change the highlighted USER SETTINGS below
   ## except you know exactly what you are doing!
@@ -378,6 +378,10 @@ void recordCycle() {
 
   // Last iteration or autosave interval -> save to file
   if (!isRecording || (nowTime - saveTime >= AUTOSAVE_TIME)) {
+    if (!isRecording) {
+      // Stop serial output
+      conf.ser_output = false;
+    }
     // Generate current recording spectrum in NPESv2 format
     JsonDocument doc;
 
@@ -386,8 +390,8 @@ void recordCycle() {
     JsonObject data_0 = doc["data"].add<JsonObject>();
 
     JsonObject data_0_deviceData = data_0["deviceData"].to<JsonObject>();
-    data_0_deviceData["softwareName"] = "OGD FW " + FW_VERSION;
-    data_0_deviceData["deviceName"] = "Open Gamma Detector Rev. 4";
+    data_0_deviceData["softwareName"] = "OGK FW " + FW_VERSION;
+    data_0_deviceData["deviceName"] = "OpenGammaKit v0.1.1";
 
     JsonObject data_0_resultData_energySpectrum = data_0["resultData"]["energySpectrum"].to<JsonObject>();
     data_0_resultData_energySpectrum["numberOfChannels"] = ADC_BINS;
@@ -414,6 +418,12 @@ void recordCycle() {
     saveFile.close();
 
     saveTime = nowTime;
+
+    // Serialize the content of doc into a String
+    String serializedDocContent;
+    serializeJson(doc, serializedDocContent);
+    // print content of the spectrum on serial output
+    cleanPrintln(serializedDocContent);
   }
 }
 
@@ -688,13 +698,13 @@ void deviceInfo([[maybe_unused]] String *args) {
 
   /*This is JSON format output block*/
   cleanPrintln("[");
-  println("Product name|Open Gamma Kit");
+  println("Product Name|OpenGammaKit");
   println("Firmware Version|" + FW_VERSION);
   println("Developer|Vadym Vikulin");
   println("Repository|https://github.com/vikulin/OpenGammaKit");
-  println("Short product name|OGK");
+  println("Short Product Name|OGK");
   println("Runtime|" + String(millis() / 1000.0) + " s");
-  println("Last reset reason|"+RESET_REASON_TEXT[rp2040.getResetReason()]);
+  println("Last Reset Reason|"+RESET_REASON_TEXT[rp2040.getResetReason()]);
   println("Average Dead Time|"+((total_events == 0) ? "n/a" : String(round(avg_dt), 0) + " µs"));
 
   const float deadtime_frac = avg_dt * total_events / 1000.0 / float(millis()) * 100.0;
@@ -1331,7 +1341,7 @@ void setup1() {
     { toggleTRNG, "set trng", "<toggle> Either 'on' or 'off' to toggle the true random number generator output." },
     { toggleDisplay, "set display", "<toggle> Either 'on' or 'off' to enable or force disable OLED support." },
     { setMode, "set mode", "<mode> Either 'geiger' or 'energy' to disable or enable energy measurements. Geiger mode only counts pulses, but is a lot faster." },
-    { setSerialOutMode, "set out", "<mode> Either 'events', 'spectrum' or 'off'. 'events' prints events as they arrive, 'spectrum' prints the accumulated histogram." },
+    { setSerialOutMode, "set out", "<mode> Either 'events', 'spectrum' or 'off'. 'events' prints accumulated number of events as they arrive, 'spectrum' prints the accumulated histogram." },
     { setMeasAveraging, "set averaging", "<number> Number of ADC averages for each energy measurement. Takes ints, minimum is 1." },
     { setTickerRate, "set tickrate", "<number> Rate at which the buzzer ticks, ticks once every <number> of pulses. Takes ints, minimum is 1." },
     { toggleTicker, "set ticker", "<toggle> Either 'on' or 'off' to enable or disable the onboard ticker." },
@@ -1382,7 +1392,7 @@ void setup1() {
   shell.begin(2000000);
   shell1.begin(2000000);
 
-  println("Welcome to the Open Gamma Detector!");
+  println("Welcome to the OpenGammaKit!");
   println("Firmware Version " + FW_VERSION);
 
   if (conf.enable_display) {
@@ -1404,7 +1414,7 @@ void setup1() {
 
       display.clearDisplay();
 
-      display.println("Open Gamma Detector");
+      display.println("OpenGammaKit");
       display.println();
       display.setTextSize(1);
       display.print("FW ");
