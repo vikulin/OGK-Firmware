@@ -81,7 +81,7 @@ struct Config {
     =================
 */
 
-const String FW_VERSION = "1.1.5";  // Firmware Version Code
+const String FW_VERSION = "1.1.6";  // Firmware Version Code
 
 const uint8_t GND_PIN = A2;    // GND meas pin
 const uint8_t VSYS_MEAS = A3;  // VSYS/3
@@ -128,6 +128,7 @@ uint32_t recordingDuration = 0;        // Duration of the spectrum recording in 
 String recordingFile = "";             // Filename for the spectrum recording file
 volatile bool isRecording = false;     // Currently running a recording
 unsigned long recordingStartTime = 0;  // Start timestamp of the recording in ms
+String lastRecordedSpectrum = "No data";      // Last recorded spectrum data
 
 volatile bool adc_lock = false;  // Locks the ADC if it's currently in use
 
@@ -171,7 +172,7 @@ Task updateDisplayTask(DISPLAY_REFRESH, TASK_FOREVER, &updateDisplay);
 Task dataOutputTask(OUT_REFRESH, TASK_FOREVER, &dataOutput);
 Task updateBaselineTask(1, TASK_FOREVER, &updateBaseline);
 Task resetPHCircuitTask(1, TASK_FOREVER, &resetPHCircuit);
-Task recordCycleTask(60000, 0, &recordCycle);
+Task recordCycleTask(1000, 0, &recordCycle); // 1 second interval
 
 // Scheduler
 Scheduler schedule;
@@ -365,6 +366,7 @@ void recordCycle() {
 
   if (!isRecording) {
     isRecording = true;
+    lastRecordedSpectrum = "No data";
     recordingStartTime = nowTime;
     saveTime = nowTime;
 
@@ -420,10 +422,7 @@ void recordCycle() {
     saveTime = nowTime;
 
     // Serialize the content of doc into a String
-    String serializedDocContent;
-    serializeJson(doc, serializedDocContent);
-    // print content of the spectrum on serial output
-    cleanPrintln(serializedDocContent);
+    serializeJson(doc, lastRecordedSpectrum);
   }
 }
 
@@ -472,11 +471,9 @@ void recordStart(String *args) {
   recordingFile = filename + ".json";  // Force JSON file extension because of NPESv2
   recordingDuration = time;
 
-  println("Starting recording to file '" + recordingFile + "' for " + String(recordingDuration) + " minutes.");
-  println("You can always check out the current status or stop the recording.");
-
   // Set task duration and start the task
-  recordCycleTask.setIterations(time + 1);  // Time is in minutes, task executes every minute, so time == iterations
+  int durationInSeconds = time;
+  recordCycleTask.setIterations(durationInSeconds + 1);
   recordCycleTask.enable();
 }
 
@@ -492,7 +489,7 @@ void recordStop([[maybe_unused]] String *args) {
   recordCycleTask.setIterations(1);  // Run for one last time
   recordCycleTask.restart();         // Run immediately
 
-  println("Stopped spectrum recording to file '" + recordingFile + "' after " + String(runTime) + " minutes.");
+  println("Stopped spectrum recording to file '" + recordingFile + "' after " + String(runTime) + " seconds.");
 }
 
 
@@ -504,7 +501,7 @@ void recordStatus([[maybe_unused]] String *args) {
     return;
   }
 
-  const float runTime = (millis() - recordingStartTime) / 1000.0 / 60.0;
+  const float runTime = (millis() - recordingStartTime) / 1000.0;
 
   println("Recording Status:Running...");
   print("Recording File:");
@@ -513,7 +510,7 @@ void recordStatus([[maybe_unused]] String *args) {
   cleanPrint(runTime);
   cleanPrint(" / ");
   cleanPrint(recordingDuration);
-  cleanPrintln(" minutes");
+  cleanPrintln(" seconds");
   print("Progress:\t");
   cleanPrint(runTime / recordingDuration * 100.0);
   cleanPrintln(" %");
@@ -528,15 +525,12 @@ void setSerialOutMode(String *args) {
   if (command == "spectrum") {
     conf.ser_output = true;
     conf.print_spectrum = true;
-    println("Set serial output mode to spectrum histogram.");
   } else if (command == "events") {
     conf.ser_output = true;
     conf.print_spectrum = false;
-    println("Set serial output mode to events.");
   } else if (command == "off") {
     conf.ser_output = false;
     conf.print_spectrum = false;
-    println("Disabled serial outputs.");
   } else {
     println("Invalid input '" + command + "'.", true);
     println("Must be 'spectrum', 'events' or 'off'.", true);
@@ -573,10 +567,8 @@ void toggleTicker(String *args) {
 
   if (command == "on") {
     conf.enable_ticker = true;
-    println("Enabled ticker output.");
   } else if (command == "off") {
     conf.enable_ticker = false;
-    println("Disabled ticker output.");
   } else {
     println("Invalid input '" + command + "'.", true);
     println("Must be 'on' or 'off'.", true);
@@ -595,7 +587,6 @@ void setTickerRate(String *args) {
 
   if (number > 0) {
     conf.tick_rate = number;
-    println("Set ticker rate to " + String(number) + ".");
     saveSettings();
   } else {
     println("Invalid input '" + command + "'.", true);
@@ -611,10 +602,8 @@ void setMode(String *args) {
 
   if (command == "geiger") {
     conf.geiger_mode = true;
-    println("Enabled geiger mode.");
   } else if (command == "energy") {
     conf.geiger_mode = false;
-    println("Enabled energy measuring mode.");
   } else {
     println("Invalid input '" + command + "'.", true);
     println("Must be 'geiger' or 'energy'.", true);
@@ -632,10 +621,8 @@ void toggleTRNG(String *args) {
 
   if (command == "on") {
     conf.enable_trng = true;
-    println("Enabled True Random Number Generator output.");
   } else if (command == "off") {
     conf.enable_trng = false;
-    println("Disabled True Random Number Generator output.");
   } else {
     println("Invalid input '" + command + "'.", true);
     println("Must be 'on' or 'off'.", true);
@@ -652,11 +639,9 @@ void toggleBaseline(String *args) {
 
   if (command == "on") {
     conf.subtract_baseline = true;
-    println("Enabled automatic DC bias subtraction.");
   } else if (command == "off") {
     conf.subtract_baseline = false;
-    current_baseline = 0;  // Reset baseline back to zero
-    println("Disabled automatic DC bias subtraction.");
+    current_baseline = 0;  // Reset baseline back to ze
   } else {
     println("Invalid input '" + command + "'.", true);
     println("Must be 'on' or 'off'.", true);
@@ -674,7 +659,6 @@ void setMeasAveraging(String *args) {
 
   if (number > 0) {
     conf.meas_avg = number;
-    println("Set measurement averaging to " + String(number) + ".");
     saveSettings();
   } else {
     println("Invalid input '" + command + "'.", true);
@@ -724,19 +708,13 @@ void deviceInfo([[maybe_unused]] String *args) {
   println("Power-on hours|"+((power_on == 0) ? "n/a" : String(power_on)));
 
   cleanPrintln("]");
-
   end();
 }
 
 
 void getSpectrumData([[maybe_unused]] String *args) {
-  cleanPrintln();
-  println("Pulse height histogram:");
-  for (size_t i = 0; i < ADC_BINS; i++) {
-    cleanPrintln(spectrum[i]);
-  }
-  cleanPrintln();
-  println("Hint: To import this data into Gamma MCA, you have to replace all the ';' with a new line '\n'.");
+  cleanPrintln(lastRecordedSpectrum);
+  end();
 }
 
 
@@ -1330,7 +1308,7 @@ void setup1() {
 
   // Define an array of CommandInfo objects with function pointers and descriptions
   CommandInfo allCommands[] = {
-    { getSpectrumData, "read spectrum", "Read the spectrum histogram collected since the last reset." },
+    { getSpectrumData, "read spectrum", "Read the spectrum file saved since the last measurement." },
     { readSettings, "read settings", "Read the current settings (file)." },
     { deviceInfo, "read info", "Read misc info about the firmware and state of the device." },
     { fsInfo, "read fs", "Read misc info about the used filesystem." },
@@ -1345,7 +1323,7 @@ void setup1() {
     { setMeasAveraging, "set averaging", "<number> Number of ADC averages for each energy measurement. Takes ints, minimum is 1." },
     { setTickerRate, "set tickrate", "<number> Rate at which the buzzer ticks, ticks once every <number> of pulses. Takes ints, minimum is 1." },
     { toggleTicker, "set ticker", "<toggle> Either 'on' or 'off' to enable or disable the onboard ticker." },
-    { recordStart, "record start", "<time [min]> <filename> Start spectrum recording for duration <time> in minutes, (auto)save to <filename>." },
+    { recordStart, "record start", "<time [sec]> <filename> Start spectrum recording for duration <time> in seconds, (auto)save to <filename>." },
     { recordStop, "record stop", "Stop the recording." },
     { recordStatus, "record status", "Get the recording status." },
     { clearSpectrumData, "reset spectrum", "Reset the on-board spectrum histogram." },
