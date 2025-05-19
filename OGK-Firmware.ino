@@ -37,6 +37,16 @@
 #include <LittleFS.h>              // Used for FS, stores the settings and debug files
 #include <RunningMedian.h>         // Used to get running median and average with circular buffers
 
+#include "hardware/adc.h"
+#include "hardware/dma.h"
+#include "hardware/regs/adc.h"
+
+const uint ADC_CHANNEL = 1;      // ADC channel
+const uint NSAMPLES = 2;        // Number of samples per batch
+
+uint16_t adc_buffer[NSAMPLES];
+int dma_chan;
+
 /*
     ===================
     BEGIN USER SETTINGS
@@ -63,7 +73,7 @@ struct Config {
   bool ser_output = true;         // Wheter data should be Serial.println'ed
   bool geiger_mode = false;       // Measure only cps, not energy
   bool print_spectrum = false;    // Print the finishes spectrum, not just chronological events
-  size_t meas_avg = 2;            // Number of meas. averaged each event, higher=longer dead time
+  size_t meas_avg = NSAMPLES;     // Number of meas. averaged each event, higher=longer dead time
   bool enable_display = false;    // Enable I2C Display, see settings above
   bool enable_trng = false;       // Enable the True Random Number Generator
   bool subtract_baseline = true;  // Subtract the DC bias from each pulse
@@ -81,7 +91,7 @@ struct Config {
     =================
 */
 
-const String FW_VERSION = "1.1.8";  // Firmware Version Code
+const String FW_VERSION = "2.0.0";  // Firmware Version Code
 
 const uint8_t GND_PIN = A2;    // GND meas pin
 const uint8_t VSYS_MEAS = A3;  // VSYS/3
@@ -113,12 +123,6 @@ volatile unsigned long start_time = 0;   // Time in ms when the spectrum collect
 volatile unsigned long last_time = 0;    // Last time the display has been refreshed
 volatile uint32_t last_total = 0;        // Last total pulse count for display
 
-const uint16_t TRNG_STORAGE_SIZE = 1024;        // Number of trng bytes stored in memory
-volatile unsigned long trng_stamps[3];          // Timestamps for True Random Number Generator
-volatile uint8_t random_num = 0b00000000;       // Generated random bits that form a byte together
-volatile uint8_t bit_index = 0;                 // Bit index for the generated number
-volatile uint8_t trng_nums[TRNG_STORAGE_SIZE];  // TRNG number output array
-volatile uint16_t number_index = 0;             // Amount of saved numbers to the TRNG array
 volatile size_t total_events = 0;               // Total number of all registered pulses
 
 RunningMedian baseline(BASELINE_NUM);  // Array of a number of baseline (DC bias) measurements at the SiPM input
@@ -313,19 +317,7 @@ void dataOutput() {
       }
     }
   }
-
-  // MAYBE SEPARATE TRNG AND SERIAL OUTPUT TASKS?
-  if (conf.enable_trng) {
-    if (Serial || Serial2) {
-      for (size_t i = 0; i < number_index; i++) {
-        cleanPrint(trng_nums[i], DEC);
-        cleanPrintln(";");
-      }
-      number_index = 0;
-    }
-  }
 }
-
 
 void updateBaseline() {
   static uint8_t baseline_done = 0;
@@ -334,8 +326,27 @@ void updateBaseline() {
   if (conf.subtract_baseline) {
     if (!adc_lock) {
       adc_lock = true;  // Disable interrupt ADC measurements while resetting
-      baseline.add(analogRead(AIN_PIN));
+      
+      
+      startDMA(); // Start new DMA transfer
+
+      // Wait for DMA to complete
+      while (dma_channel_is_busy(dma_chan)) {
+        delay(1);
+      }
+
+      uint16_t sum = 0;
+
+      // Process and print ADC data
+      for (uint i = 0; i < NSAMPLES; i++) {
+        uint16_t v = adc_buffer[i];
+        sum += v;
+      }
+
       adc_lock = false;
+
+      float avg = float(sum) / float(conf.meas_avg);
+      baseline.add(avg);
 
       baseline_done++;
 
@@ -346,15 +357,6 @@ void updateBaseline() {
       }
     }
   }
-}
-
-
-float readTemp() {
-  adc_lock = true;                        // Flag this, so that nothing else uses the ADC in the mean time
-  delayMicroseconds(conf.meas_avg * 20);  // Wait for an already-executing interrupt
-  const float temp = analogReadTemp(VREF_VOLTAGE);
-  adc_lock = false;
-  return temp;
 }
 
 
@@ -679,7 +681,6 @@ void deviceInfo([[maybe_unused]] String *args) {
   println("CPU Frequency|" + String(rp2040.f_cpu() / 1e6) + " MHz");
   println("Used Heap Memory|" + String(rp2040.getUsedHeap() / 1000.0) + " kB / " + String(rp2040.getUsedHeap() * 100.0 / rp2040.getTotalHeap(), 0) + "%");
   println("Free Heap Memory|" + String(rp2040.getFreeHeap() / 1000.0) + " kB / " + String(rp2040.getFreeHeap() * 100.0 / rp2040.getTotalHeap(), 0) + "%");
-  println("Temperature|" + String(round(readTemp() * 10.0) / 10.0, 1) + " °C");
   println("USB Connection|" + String(digitalRead(VBUS_MEAS)));
 
   const float v = 3.0 * analogRead(VSYS_MEAS) * VREF_VOLTAGE / (ADC_BINS - 1);
@@ -989,7 +990,7 @@ void drawSpectrum() {
   if (time_delta == 0) {  // Catch divide by zero
     time_delta = 1000;
   }
-
+  
   display.clearDisplay();
   display.setCursor(0, 0);
 
@@ -1006,23 +1007,11 @@ void drawSpectrum() {
   if (avg_dt > 0.) {
     avg_cps_corrected = avg_cps / (1.0 - avg_cps * avg_dt / 1.0e6);
   }
-
+  
   display.print(avg_cps_corrected, 1);
   display.print(" cps");
-
-  static int16_t temp = round(readTemp());
-
-  if (!adc_lock) {  // Only update if ADC is free atm
-    temp = round(readTemp());
-  }
-
-  display.setCursor(SCREEN_WIDTH - ((temp < 0) ? 36 : 30), 0);
-
-  display.print(temp);
-  display.print(" ");
-  display.print((char)247);
-  display.println("C");
-
+  
+  
   const unsigned long seconds_running = round((millis() - start_time) / 1000.0);
   const uint8_t char_offset = floor(log10(seconds_running));
 
@@ -1101,19 +1090,6 @@ void drawGeigerCounts() {
   display.print("Max: ");
   display.println(max_cps, 1);
 
-  static int16_t temp = round(readTemp());
-
-  if (!adc_lock) {  // Only update if ADC is free atm
-    temp = round(readTemp());
-  }
-
-  display.setCursor(SCREEN_WIDTH - ((temp < 0) ? 36 : 30), 0);
-
-  display.print(temp);
-  display.print(" ");
-  display.print((char)247);
-  display.println("C");
-
   display.setCursor(0, 0);
   display.setTextSize(2);
 
@@ -1141,6 +1117,46 @@ void drawGeigerCounts() {
   END DISPLAY FUNCTIONS
 */
 
+
+
+void setupADC() {
+  adc_init();
+  adc_gpio_init(AIN_PIN);
+  adc_select_input(ADC_CHANNEL);
+
+  // Set sample rate
+  adc_set_clkdiv(0);
+
+  adc_fifo_setup(
+    true,  // Enable FIFO
+    true,  // Enable DMA data request (DREQ)
+    1,     // DREQ threshold
+    false, false
+  );
+
+  adc_run(true);
+}
+
+void startDMA() {
+  dma_channel_config cfg = dma_channel_get_default_config(dma_chan);
+
+  channel_config_set_transfer_data_size(&cfg, DMA_SIZE_16);
+  channel_config_set_read_increment(&cfg, false);
+  channel_config_set_write_increment(&cfg, true);
+  channel_config_set_dreq(&cfg, DREQ_ADC);
+  channel_config_set_chain_to(&cfg, dma_chan);
+
+  dma_channel_configure(
+    dma_chan,
+    &cfg,
+    adc_buffer,        // Destination buffer
+    &adc_hw->fifo,     // Source: ADC FIFO
+    NSAMPLES,
+    true               // Start immediately
+  );
+}
+
+
 void eventInt() {
 
   const unsigned long start = micros();
@@ -1160,10 +1176,19 @@ void eventInt() {
   uint16_t mean = 0;
 
   if (!conf.geiger_mode && !adc_lock) {
-    uint32_t sum = 0;
 
-    for (size_t i = 0; i < conf.meas_avg; i++) {
-      sum += analogRead(AIN_PIN);
+    startDMA(); // Start new DMA transfer
+
+    // Wait for DMA to complete
+    while (dma_channel_is_busy(dma_chan)) {
+      //delay(1);
+    }
+
+    uint16_t sum = 0;
+
+    // Process and print ADC data
+    for (uint i = 0; i < NSAMPLES; i++) {
+      sum += adc_buffer[i];
     }
 
     resetSampleHold();
@@ -1196,12 +1221,15 @@ void eventInt() {
 */
 void setup() {
   pinMode(AMP_PIN, INPUT);
+  //pinMode(ADC_PIN, INPUT);
   pinMode(INT_PIN, INPUT);
-  pinMode(AIN_PIN, INPUT);
   pinMode(RST_PIN, OUTPUT_12MA);
-  pinMode(LED, OUTPUT);
+  
+  setupADC();
 
-  //gpio_set_slew_rate(RST_PIN, GPIO_SLEW_RATE_SLOW);  // Slow slew rate to reduce EMI
+  dma_chan = dma_claim_unused_channel(true);
+
+    //gpio_set_slew_rate(RST_PIN, GPIO_SLEW_RATE_SLOW);  // Slow slew rate to reduce EMI
   gpio_set_slew_rate(LED, GPIO_SLEW_RATE_SLOW);  // Slow slew rate to reduce EMI
 
   analogReadResolution(ADC_RES);
@@ -1339,10 +1367,10 @@ void setup1() {
   queryButtonTask.setSchedulingOption(TASK_INTERVAL);
   //resetPHCircuitTask.setSchedulingOption(TASK_INTERVAL);
   //updateBaselineTask.setSchedulingOption(TASK_INTERVAL);
-
+  
   schedule.init();
   schedule.allowSleep(true);
-
+  
   schedule.addTask(writeDebugFileTimeTask);
   schedule.addTask(queryButtonTask);
   schedule.addTask(updateDisplayTask);
@@ -1356,7 +1384,7 @@ void setup1() {
   updateBaselineTask.enable();
   writeDebugFileTimeTask.enableDelayed(60 * 60 * 1000);
   dataOutputTask.enableDelayed(OUT_REFRESH);
-
+  
   if (conf.enable_display) {
     // Only enable display task if the display function is enabled
     updateDisplayTask.enableDelayed(DISPLAY_REFRESH);
@@ -1370,8 +1398,6 @@ void setup1() {
   BEGIN LOOP FUNCTIONS
 */
 void loop() {
-  // Do nothing here
-
   __wfi();  // Wait for interrupt
 }
 
