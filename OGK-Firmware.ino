@@ -613,25 +613,6 @@ void setMode(String *args) {
   saveSettings();
 }
 
-
-void toggleTRNG(String *args) {
-  String command = *args;
-  command.replace("set trng", "");
-  command.trim();
-
-  if (command == "on") {
-    conf.enable_trng = true;
-  } else if (command == "off") {
-    conf.enable_trng = false;
-  } else {
-    println("Invalid input '" + command + "'.", true);
-    println("Must be 'on' or 'off'.", true);
-    return;
-  }
-  saveSettings();
-}
-
-
 void toggleBaseline(String *args) {
   String command = *args;
   command.replace("set baseline", "");
@@ -1153,28 +1134,15 @@ void drawGeigerCounts() {
 */
 
 void eventInt() {
-  // Disable interrupt generation for this pin ASAP.
-  // Directly uses Core0 IRQ Ctrl (core1 does not set the interrupt).
-  // Thanks a lot to all the replies at
-  // https://github.com/earlephilhower/arduino-pico/discussions/1397!
-  // NOTE: NOT SUPPORTED ON PICO 2 / RP2350
-  //static io_rw_32 *addr = &(iobank0_hw->proc0_irq_ctrl.inte[INT_PIN / 8]);
-  //static uint32_t mask1 = 0b1111 << (INT_PIN % 8) * 4u;
-  //hw_clear_bits(addr, mask1);
 
   const unsigned long start = micros();
 
-  digitalWriteFast(LED, HIGH);  // Enable activity LED
-
-  //const unsigned long start_millis = millis();
-  //static unsigned long last_tick = start_millis;  // Last buzzer tick in ms, not needed with tone()
   static uint8_t count = 0;
 
   // Check if ticker is enabled, currently not "ticking" and also catch the millis() overflow
-  if (conf.enable_ticker /* && (start_millis - last_tick > BUZZER_TICK || start_millis < last_tick)*/) {
+  if (conf.enable_ticker) {
     if (count >= conf.tick_rate - 1) {             // Only click at every 10th count
       tone(BUZZER_PIN, BUZZER_FREQ, BUZZER_TICK);  // Worse at higher cps
-      //last_tick = start_millis;
       count = 0;
     } else {
       count++;
@@ -1206,44 +1174,6 @@ void eventInt() {
     display_spectrum[mean] += 1;
   }
 
-  if (conf.enable_trng) {
-    static uint8_t trng_index = 0;  // Timestamp index for True Random Number Generator
-
-    // Calculations for the TRNG
-    trng_stamps[trng_index] = micros();
-
-    if (trng_index < 2) {
-      trng_index++;
-    } else {
-      // Catch micros() overflow
-      if (trng_stamps[1] > trng_stamps[0] && trng_stamps[2] > trng_stamps[1]) {
-        const uint32_t delta0 = trng_stamps[1] - trng_stamps[0];
-        const uint32_t delta1 = trng_stamps[2] - trng_stamps[1];
-
-        bitWrite(random_num, bit_index, (delta0 < delta1));
-
-        if (bit_index < 7) {  // Check if still less than a byte
-          bit_index++;
-        } else {
-          trng_nums[number_index] = random_num;
-
-          if (number_index < TRNG_STORAGE_SIZE - 1) {  // Check if TRNG byte storage array is full
-            number_index++;
-          } else {
-            number_index = 0;  // Catch overflow
-          }
-
-          random_num = 0b00000000;  // Clear number
-          bit_index = 0;
-        }
-      }
-
-      trng_index = 0;
-    }
-  }
-
-  digitalWriteFast(LED, LOW);  // Disable activity LED
-
   const unsigned long end = micros();
 
   if (end >= start) {  // Catch micros() overflow
@@ -1251,15 +1181,6 @@ void eventInt() {
     total_events++;
     dead_time.add(end - start);
   }
-
-
-  // NOTE: NOT SUPPORTED ON PICO 2 / RP2350
-  // Re-enable interrupts
-  //static uint32_t mask2 = 0b0100 << (INT_PIN % 8) * 4u;
-  //hw_set_bits(addr, mask2);
-
-  // Clear all interrupts on the executing core
-  //irq_clear(15);  // IRQ 15 = SIO_IRQ_PROC0
 }
 
 /*
@@ -1316,7 +1237,6 @@ void setup1() {
     { readFileFS, "read file", "<filename> Print the contents of the file <filename> from the data directory." },
     { removeFileFS, "remove file", "<filename> Remove the file <filename> from the data directory." },
     { toggleBaseline, "set baseline", "<toggle> Automatically subtract the DC bias (baseline) from each signal." },
-    { toggleTRNG, "set trng", "<toggle> Either 'on' or 'off' to toggle the true random number generator output." },
     { toggleDisplay, "set display", "<toggle> Either 'on' or 'off' to enable or force disable OLED support." },
     { setMode, "set mode", "<mode> Either 'geiger' or 'energy' to disable or enable energy measurements. Geiger mode only counts pulses, but is a lot faster." },
     { setSerialOutMode, "set out", "<mode> Either 'events', 'spectrum' or 'off'. 'events' prints accumulated number of events as they arrive, 'spectrum' prints the accumulated histogram." },
