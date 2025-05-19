@@ -81,7 +81,7 @@ struct Config {
     =================
 */
 
-const String FW_VERSION = "1.1.6";  // Firmware Version Code
+const String FW_VERSION = "1.1.8";  // Firmware Version Code
 
 const uint8_t GND_PIN = A2;    // GND meas pin
 const uint8_t VSYS_MEAS = A3;  // VSYS/3
@@ -752,6 +752,14 @@ void rebootNow([[maybe_unused]] String *args) {
 }
 
 
+void firmwareUpgrade([[maybe_unused]] String *args) {
+  println("Firmware upgrade mode...");
+  println("Rebooting now...");
+  delay(1000);
+  rp2040.rebootToBootloader();
+}
+
+
 void serialEvent() {
   shell.handleEvent();  // Handle the serial input for the USB Serial
   //shell1.handleEvent();  // Handle the serial input for the Hardware Serial
@@ -1248,7 +1256,8 @@ void setup1() {
     { recordStatus, "record status", "Get the recording status." },
     { clearSpectrumData, "reset spectrum", "Reset the on-board spectrum histogram." },
     { resetSettings, "reset settings", "Reset all the settings/revert them back to default values." },
-    { rebootNow, "reboot", "Reboot the device." }
+    { rebootNow, "reboot", "Reboot the device." },
+    { firmwareUpgrade, "upgrade", "Reboot and upgrade formware" }
   };
 
   // Get the number of allCommands
