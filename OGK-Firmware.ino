@@ -47,7 +47,6 @@
 #define SCREEN_WIDTH 128            // OLED display width, in pixels
 #define SCREEN_HEIGHT 64            // OLED display height, in pixels
 #define SCREEN_ADDRESS 0x3C         // See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
-#define BASELINE_NUM 101            // Number of measurements taken to determine the DC baseline
 #define CONFIG_FILE "/config.json"  // File to store the settings
 #define DEBUG_FILE "/debug.json"    // File to store some misc debug info
 #define DISPLAY_REFRESH 1000        // Milliseconds between display refreshs
@@ -66,13 +65,12 @@ struct Config {
   size_t meas_avg = 2;            // Number of meas. averaged each event, higher=longer dead time
   bool enable_display = false;    // Enable I2C Display, see settings above
   bool enable_trng = false;       // Enable the True Random Number Generator
-  bool subtract_baseline = true;  // Subtract the DC bias from each pulse
   bool enable_ticker = false;     // Enable the buzzer to be used as a ticker for pulses
   size_t tick_rate = 20;          // Buzzer ticks once every tick_rate pulses
 
   // Do NOT modify the following operator function
   bool operator==(const Config &other) const {
-    return (tick_rate == other.tick_rate && enable_ticker == other.enable_ticker && ser_output == other.ser_output && geiger_mode == other.geiger_mode && print_spectrum == other.print_spectrum && meas_avg == other.meas_avg && enable_display == other.enable_display && enable_trng == other.enable_trng && subtract_baseline == other.subtract_baseline);
+    return (tick_rate == other.tick_rate && enable_ticker == other.enable_ticker && ser_output == other.ser_output && geiger_mode == other.geiger_mode && print_spectrum == other.print_spectrum && meas_avg == other.meas_avg && enable_display == other.enable_display && enable_trng == other.enable_trng);
   }
 };
 /*
@@ -81,7 +79,7 @@ struct Config {
     =================
 */
 
-const String FW_VERSION = "1.1.8";  // Firmware Version Code
+const String FW_VERSION = "2.0.1";  // Firmware Version Code
 
 const uint8_t GND_PIN = A2;    // GND meas pin
 const uint8_t VSYS_MEAS = A3;  // VSYS/3
@@ -112,26 +110,14 @@ volatile uint32_t display_spectrum[ADC_BINS];  // Holds the display histogram (s
 volatile unsigned long start_time = 0;   // Time in ms when the spectrum collection has started
 volatile unsigned long last_time = 0;    // Last time the display has been refreshed
 volatile uint32_t last_total = 0;        // Last total pulse count for display
-
-const uint16_t TRNG_STORAGE_SIZE = 1024;        // Number of trng bytes stored in memory
-volatile unsigned long trng_stamps[3];          // Timestamps for True Random Number Generator
-volatile uint8_t random_num = 0b00000000;       // Generated random bits that form a byte together
-volatile uint8_t bit_index = 0;                 // Bit index for the generated number
-volatile uint8_t trng_nums[TRNG_STORAGE_SIZE];  // TRNG number output array
-volatile uint16_t number_index = 0;             // Amount of saved numbers to the TRNG array
-volatile size_t total_events = 0;               // Total number of all registered pulses
-
-RunningMedian baseline(BASELINE_NUM);  // Array of a number of baseline (DC bias) measurements at the SiPM input
-uint16_t current_baseline = 0;         // Median value of the input baseline voltage
+volatile uint32_t total_events = 0;               // Total number of all registered pulses
 
 uint32_t recordingDuration = 0;        // Duration of the spectrum recording in seconds
 String recordingFile = "";             // Filename for the spectrum recording file
 volatile bool isRecording = false;     // Currently running a recording
 unsigned long recordingStartTime = 0;  // Start timestamp of the recording in ms
 String lastRecordedSpectrum = "No data";      // Last recorded spectrum data
-
-volatile bool adc_lock = false;  // Locks the ADC if it's currently in use
-
+//volatile bool adc_lock = false;  // Locks the ADC if it's currently in use
 // Stores 5 * DISPLAY_REFRESH worth of "current" cps to calculate an average cps value in a ring buffer config
 RunningMedian counts(5);
 
@@ -161,7 +147,6 @@ void writeDebugFileTime();
 void queryButton();
 void updateDisplay();
 void dataOutput();
-void updateBaseline();
 void resetPHCircuit();
 void recordCycle();
 
@@ -170,8 +155,7 @@ Task writeDebugFileTimeTask(60 * 60 * 1000, TASK_FOREVER, &writeDebugFileTime);
 Task queryButtonTask(100, TASK_FOREVER, &queryButton);
 Task updateDisplayTask(DISPLAY_REFRESH, TASK_FOREVER, &updateDisplay);
 Task dataOutputTask(OUT_REFRESH, TASK_FOREVER, &dataOutput);
-Task updateBaselineTask(1, TASK_FOREVER, &updateBaseline);
-Task resetPHCircuitTask(1, TASK_FOREVER, &resetPHCircuit);
+//Task resetPHCircuitTask(1, TASK_FOREVER, &resetPHCircuit);
 Task recordCycleTask(1000, 0, &recordCycle); // 1 second interval
 
 // Scheduler
@@ -202,23 +186,6 @@ void clearSpectrumDisplay() {
   start_time = millis();  // Spectrum pulse collection has started
   last_time = millis();
   last_total = 0;  // Remove old values
-}
-
-
-void resetSampleHold(uint8_t time = 2) {  // Reset sample and hold circuit
-  digitalWriteFast(RST_PIN, HIGH);
-  delayMicroseconds(time);  // Discharge for (default) 2 µs -> ~99% discharge time for 1 kOhm and 470 pF
-  digitalWriteFast(RST_PIN, LOW);
-}
-
-
-void resetPHCircuit() {
-  if (!adc_lock) {
-    adc_lock = true;    // Disable interrupt ADC measurements while resetting
-    resetSampleHold();  // Periodically reset the S&H/P&H circuit
-    adc_lock = false;
-  }
-  // TODO: Check if adc was locked and decrease interval to compensate
 }
 
 
@@ -313,48 +280,6 @@ void dataOutput() {
       }
     }
   }
-
-  // MAYBE SEPARATE TRNG AND SERIAL OUTPUT TASKS?
-  if (conf.enable_trng) {
-    if (Serial || Serial2) {
-      for (size_t i = 0; i < number_index; i++) {
-        cleanPrint(trng_nums[i], DEC);
-        cleanPrintln(";");
-      }
-      number_index = 0;
-    }
-  }
-}
-
-
-void updateBaseline() {
-  static uint8_t baseline_done = 0;
-
-  // Compute the median DC baseline to subtract from each pulse
-  if (conf.subtract_baseline) {
-    if (!adc_lock) {
-      adc_lock = true;  // Disable interrupt ADC measurements while resetting
-      baseline.add(analogRead(AIN_PIN));
-      adc_lock = false;
-
-      baseline_done++;
-
-      if (baseline_done >= BASELINE_NUM) {
-        current_baseline = round(baseline.getMedian());  // Take the median value
-
-        baseline_done = 0;
-      }
-    }
-  }
-}
-
-
-float readTemp() {
-  adc_lock = true;                        // Flag this, so that nothing else uses the ADC in the mean time
-  delayMicroseconds(conf.meas_avg * 20);  // Wait for an already-executing interrupt
-  const float temp = analogReadTemp(VREF_VOLTAGE);
-  adc_lock = false;
-  return temp;
 }
 
 
@@ -613,24 +538,6 @@ void setMode(String *args) {
   saveSettings();
 }
 
-void toggleBaseline(String *args) {
-  String command = *args;
-  command.replace("set baseline", "");
-  command.trim();
-
-  if (command == "on") {
-    conf.subtract_baseline = true;
-  } else if (command == "off") {
-    conf.subtract_baseline = false;
-    current_baseline = 0;  // Reset baseline back to ze
-  } else {
-    println("Invalid input '" + command + "'.", true);
-    println("Must be 'on' or 'off'.", true);
-    return;
-  }
-  saveSettings();
-}
-
 
 void setMeasAveraging(String *args) {
   String command = *args;
@@ -670,6 +577,9 @@ void deviceInfo([[maybe_unused]] String *args) {
   println("Short Product Name|OGK");
   println("Runtime|" + String(millis() / 1000.0) + " s");
   println("Last Reset Reason|"+RESET_REASON_TEXT[rp2040.getResetReason()]);
+  for (uint16_t i = 0; i < ADC_BINS; i++) {
+      total_events += spectrum[i];
+  }
   println("Average Dead Time|"+((total_events == 0) ? "n/a" : String(round(avg_dt), 0) + " µs"));
 
   const float deadtime_frac = avg_dt * total_events / 1000.0 / float(millis()) * 100.0;
@@ -679,12 +589,7 @@ void deviceInfo([[maybe_unused]] String *args) {
   println("CPU Frequency|" + String(rp2040.f_cpu() / 1e6) + " MHz");
   println("Used Heap Memory|" + String(rp2040.getUsedHeap() / 1000.0) + " kB / " + String(rp2040.getUsedHeap() * 100.0 / rp2040.getTotalHeap(), 0) + "%");
   println("Free Heap Memory|" + String(rp2040.getFreeHeap() / 1000.0) + " kB / " + String(rp2040.getFreeHeap() * 100.0 / rp2040.getTotalHeap(), 0) + "%");
-  println("Temperature|" + String(round(readTemp() * 10.0) / 10.0, 1) + " °C");
   println("USB Connection|" + String(digitalRead(VBUS_MEAS)));
-
-  const float v = 3.0 * analogRead(VSYS_MEAS) * VREF_VOLTAGE / (ADC_BINS - 1);
-
-  println("Supply Voltage|" + String(round(v * 10.0) / 10.0, 1) + " V");
   println("Power Cycle Count|"+((power_cycle == 0) ? "n/a" : String(power_cycle)));
   println("Power-on hours|"+((power_on == 0) ? "n/a" : String(power_on)));
 
@@ -874,9 +779,6 @@ Config loadSettings(bool msg = true) {
   if (doc["enable_trng"].is<bool>()) {
     new_conf.enable_trng = doc["enable_trng"];
   }
-  if (doc["subtract_baseline"].is<bool>()) {
-    new_conf.subtract_baseline = doc["subtract_baseline"];
-  }
   if (doc["enable_ticker"].is<bool>()) {
     new_conf.enable_ticker = doc["enable_ticker"];
   }
@@ -907,7 +809,6 @@ bool writeSettingsFile() {
   doc["meas_avg"] = conf.meas_avg;
   doc["enable_display"] = conf.enable_display;
   doc["enable_trng"] = conf.enable_trng;
-  doc["subtract_baseline"] = conf.subtract_baseline;
   doc["enable_ticker"] = conf.enable_ticker;
   doc["tick_rate"] = conf.tick_rate;
 
@@ -989,7 +890,7 @@ void drawSpectrum() {
   if (time_delta == 0) {  // Catch divide by zero
     time_delta = 1000;
   }
-
+  
   display.clearDisplay();
   display.setCursor(0, 0);
 
@@ -1006,22 +907,10 @@ void drawSpectrum() {
   if (avg_dt > 0.) {
     avg_cps_corrected = avg_cps / (1.0 - avg_cps * avg_dt / 1.0e6);
   }
-
+  
   display.print(avg_cps_corrected, 1);
   display.print(" cps");
-
-  static int16_t temp = round(readTemp());
-
-  if (!adc_lock) {  // Only update if ADC is free atm
-    temp = round(readTemp());
-  }
-
-  display.setCursor(SCREEN_WIDTH - ((temp < 0) ? 36 : 30), 0);
-
-  display.print(temp);
-  display.print(" ");
-  display.print((char)247);
-  display.println("C");
+  
 
   const unsigned long seconds_running = round((millis() - start_time) / 1000.0);
   const uint8_t char_offset = floor(log10(seconds_running));
@@ -1101,19 +990,6 @@ void drawGeigerCounts() {
   display.print("Max: ");
   display.println(max_cps, 1);
 
-  static int16_t temp = round(readTemp());
-
-  if (!adc_lock) {  // Only update if ADC is free atm
-    temp = round(readTemp());
-  }
-
-  display.setCursor(SCREEN_WIDTH - ((temp < 0) ? 36 : 30), 0);
-
-  display.print(temp);
-  display.print(" ");
-  display.print((char)247);
-  display.println("C");
-
   display.setCursor(0, 0);
   display.setTextSize(2);
 
@@ -1141,54 +1017,20 @@ void drawGeigerCounts() {
   END DISPLAY FUNCTIONS
 */
 
+void resetSampleHold() {  // Reset sample and hold circuit
+  digitalWriteFast(RST_PIN, HIGH);
+  digitalWriteFast(RST_PIN, LOW);
+}
+
+
 void eventInt() {
-
-  const unsigned long start = micros();
-
-  static uint8_t count = 0;
-
-  // Check if ticker is enabled, currently not "ticking" and also catch the millis() overflow
-  if (conf.enable_ticker) {
-    if (count >= conf.tick_rate - 1) {             // Only click at every 10th count
-      tone(BUZZER_PIN, BUZZER_FREQ, BUZZER_TICK);  // Worse at higher cps
-      count = 0;
-    } else {
-      count++;
-    }
-  }
-
-  uint16_t mean = 0;
-
-  if (!conf.geiger_mode && !adc_lock) {
-    uint32_t sum = 0;
-
-    for (size_t i = 0; i < conf.meas_avg; i++) {
-      sum += analogRead(AIN_PIN);
-    }
-
-    resetSampleHold();
-
-    float avg = float(sum) / float(conf.meas_avg);
-    ;  // Use median instead of average?
-
-    if (current_baseline <= avg) {  // Catch negative numbers
-      // Subtract DC bias from pulse avg and then convert float --> uint16_t ADC channel
-      mean = round(avg - current_baseline);
-    }
-  }
-
-  if ((conf.ser_output || conf.enable_display || isRecording)) {
-    spectrum[mean] += 1;
-    display_spectrum[mean] += 1;
-  }
-
-  const unsigned long end = micros();
-
-  if (end >= start) {  // Catch micros() overflow
-    // Compute Detector Dead Time
-    total_events++;
-    dead_time.add(end - start);
-  }
+   const unsigned long start = micros();
+   uint16_t peak = analogRead(AIN_PIN);
+   resetSampleHold();
+   spectrum[peak]++;
+   display_spectrum[peak]++;
+   const unsigned long end = micros();
+   dead_time.add(end - start);
 }
 
 /*
@@ -1199,14 +1041,11 @@ void setup() {
   pinMode(INT_PIN, INPUT);
   pinMode(AIN_PIN, INPUT);
   pinMode(RST_PIN, OUTPUT_12MA);
-  pinMode(LED, OUTPUT);
 
-  //gpio_set_slew_rate(RST_PIN, GPIO_SLEW_RATE_SLOW);  // Slow slew rate to reduce EMI
   gpio_set_slew_rate(LED, GPIO_SLEW_RATE_SLOW);  // Slow slew rate to reduce EMI
 
   analogReadResolution(ADC_RES);
-
-  resetSampleHold(5);  // Reset before enabling the interrupts to avoid jamming
+  resetSampleHold();
 
   attachInterrupt(digitalPinToInterrupt(INT_PIN), eventInt, FALLING);
 
@@ -1244,7 +1083,6 @@ void setup1() {
     { readDirFS, "read dir", "Show contents of the data directory." },
     { readFileFS, "read file", "<filename> Print the contents of the file <filename> from the data directory." },
     { removeFileFS, "remove file", "<filename> Remove the file <filename> from the data directory." },
-    { toggleBaseline, "set baseline", "<toggle> Automatically subtract the DC bias (baseline) from each signal." },
     { toggleDisplay, "set display", "<toggle> Either 'on' or 'off' to enable or force disable OLED support." },
     { setMode, "set mode", "<mode> Either 'geiger' or 'energy' to disable or enable energy measurements. Geiger mode only counts pulses, but is a lot faster." },
     { setSerialOutMode, "set out", "<mode> Either 'events', 'spectrum' or 'off'. 'events' prints accumulated number of events as they arrive, 'spectrum' prints the accumulated histogram." },
@@ -1338,25 +1176,22 @@ void setup1() {
   dataOutputTask.setSchedulingOption(TASK_INTERVAL);
   queryButtonTask.setSchedulingOption(TASK_INTERVAL);
   //resetPHCircuitTask.setSchedulingOption(TASK_INTERVAL);
-  //updateBaselineTask.setSchedulingOption(TASK_INTERVAL);
-
+  
   schedule.init();
   schedule.allowSleep(true);
-
+  
   schedule.addTask(writeDebugFileTimeTask);
   schedule.addTask(queryButtonTask);
   schedule.addTask(updateDisplayTask);
   schedule.addTask(dataOutputTask);
-  schedule.addTask(updateBaselineTask);
-  schedule.addTask(resetPHCircuitTask);
+  //schedule.addTask(resetPHCircuitTask);
   schedule.addTask(recordCycleTask);
 
   queryButtonTask.enable();
-  resetPHCircuitTask.enable();
-  updateBaselineTask.enable();
+  //resetPHCircuitTask.enable();
   writeDebugFileTimeTask.enableDelayed(60 * 60 * 1000);
   dataOutputTask.enableDelayed(OUT_REFRESH);
-
+  
   if (conf.enable_display) {
     // Only enable display task if the display function is enabled
     updateDisplayTask.enableDelayed(DISPLAY_REFRESH);
@@ -1370,8 +1205,6 @@ void setup1() {
   BEGIN LOOP FUNCTIONS
 */
 void loop() {
-  // Do nothing here
-
   __wfi();  // Wait for interrupt
 }
 
