@@ -91,7 +91,7 @@ struct Config {
     =================
 */
 
-const String FW_VERSION = "2.0.0";  // Firmware Version Code
+const String FW_VERSION = "2.0.1";  // Firmware Version Code
 
 const uint8_t GND_PIN = A2;    // GND meas pin
 const uint8_t VSYS_MEAS = A3;  // VSYS/3
@@ -1011,7 +1011,7 @@ void drawSpectrum() {
   display.print(avg_cps_corrected, 1);
   display.print(" cps");
   
-  
+
   const unsigned long seconds_running = round((millis() - start_time) / 1000.0);
   const uint8_t char_offset = floor(log10(seconds_running));
 
@@ -1124,17 +1124,19 @@ void setupADC() {
   adc_gpio_init(AIN_PIN);
   adc_select_input(ADC_CHANNEL);
 
-  // Set sample rate
+  // Set ADC clock to max speed (500k samples/sec at clkdiv = 0)
   adc_set_clkdiv(0);
 
   adc_fifo_setup(
-    true,  // Enable FIFO
-    true,  // Enable DMA data request (DREQ)
-    1,     // DREQ threshold
-    false, false
+    true,   // Enable FIFO
+    true,   // Enable DMA request
+    1,      // DREQ on each sample
+    false,  // No error bit
+    false   // Don't shift to 8-bit
   );
 
-  adc_run(true);
+  adc_fifo_drain();     // Ensure FIFO is clear
+  adc_run(false);       // Don't run until triggered
 }
 
 void startDMA() {
@@ -1144,29 +1146,27 @@ void startDMA() {
   channel_config_set_read_increment(&cfg, false);
   channel_config_set_write_increment(&cfg, true);
   channel_config_set_dreq(&cfg, DREQ_ADC);
-  channel_config_set_chain_to(&cfg, dma_chan);
+  channel_config_set_chain_to(&cfg, dma_chan); // Optional
 
   dma_channel_configure(
     dma_chan,
     &cfg,
-    adc_buffer,        // Destination buffer
-    &adc_hw->fifo,     // Source: ADC FIFO
+    adc_buffer,        // Destination
+    &adc_hw->fifo,     // Source
     NSAMPLES,
-    true               // Start immediately
+    false              // Don't start yet
   );
 }
 
 
-void eventInt() {
 
+void eventInt() {
   const unsigned long start = micros();
 
   static uint8_t count = 0;
-
-  // Check if ticker is enabled, currently not "ticking" and also catch the millis() overflow
   if (conf.enable_ticker) {
-    if (count >= conf.tick_rate - 1) {             // Only click at every 10th count
-      tone(BUZZER_PIN, BUZZER_FREQ, BUZZER_TICK);  // Worse at higher cps
+    if (count >= conf.tick_rate - 1) {
+      tone(BUZZER_PIN, BUZZER_FREQ, BUZZER_TICK);
       count = 0;
     } else {
       count++;
@@ -1177,40 +1177,44 @@ void eventInt() {
 
   if (!conf.geiger_mode && !adc_lock) {
 
-    startDMA(); // Start new DMA transfer
+    // Reset DMA
+    dma_channel_abort(dma_chan);
+    adc_fifo_drain();    // Clear stale samples
+    adc_run(false);      // Ensure clean start
+
+    // Reconfigure DMA write pointer
+    dma_channel_set_write_addr(dma_chan, adc_buffer, false);
+    dma_channel_set_trans_count(dma_chan, NSAMPLES, false);
+    dma_channel_start(dma_chan);
+
+    // Start ADC NOW (after DMA armed)
+    adc_run(true);
+    adc_hw->cs |= ADC_CS_START_ONCE_BITS;
 
     // Wait for DMA to complete
-    while (dma_channel_is_busy(dma_chan)) {
-      //delay(1);
-    }
+    while (dma_channel_is_busy(dma_chan));
 
-    uint16_t sum = 0;
+    adc_run(false);  // Stop ADC to avoid leftover data
 
-    // Process and print ADC data
+    // Find peak amplitude in ADC buffer
+    uint16_t peak = 0;
     for (uint i = 0; i < NSAMPLES; i++) {
-      sum += adc_buffer[i];
+      if (adc_buffer[i] > peak) {
+        peak = adc_buffer[i];
+      }
     }
 
     resetSampleHold();
-
-    float avg = float(sum) / float(conf.meas_avg);
-    ;  // Use median instead of average?
-
-    if (current_baseline <= avg) {  // Catch negative numbers
-      // Subtract DC bias from pulse avg and then convert float --> uint16_t ADC channel
-      mean = round(avg - current_baseline);
-    }
+    mean = peak;
   }
 
   if ((conf.ser_output || conf.enable_display || isRecording)) {
-    spectrum[mean] += 1;
-    display_spectrum[mean] += 1;
+    spectrum[mean]++;
+    display_spectrum[mean]++;
   }
 
   const unsigned long end = micros();
-
-  if (end >= start) {  // Catch micros() overflow
-    // Compute Detector Dead Time
+  if (end >= start) {
     total_events++;
     dead_time.add(end - start);
   }
@@ -1236,7 +1240,7 @@ void setup() {
 
   resetSampleHold(5);  // Reset before enabling the interrupts to avoid jamming
 
-  attachInterrupt(digitalPinToInterrupt(INT_PIN), eventInt, FALLING);
+  attachInterrupt(digitalPinToInterrupt(INT_PIN), eventInt, RISING);
 
   start_time = millis();  // Spectrum pulse collection has started
 }
