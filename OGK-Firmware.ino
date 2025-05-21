@@ -128,8 +128,6 @@ volatile bool isRecording = false;     // Currently running a recording
 unsigned long recordingStartTime = 0;  // Start timestamp of the recording in ms
 String lastRecordedSpectrum = "No data";      // Last recorded spectrum data
 
-volatile bool adc_lock = false;  // Locks the ADC if it's currently in use
-
 // Stores 5 * DISPLAY_REFRESH worth of "current" cps to calculate an average cps value in a ring buffer config
 RunningMedian counts(5);
 
@@ -159,7 +157,6 @@ void writeDebugFileTime();
 void queryButton();
 void updateDisplay();
 void dataOutput();
-void resetPHCircuit();
 void recordCycle();
 
 // Tasks
@@ -167,7 +164,6 @@ Task writeDebugFileTimeTask(60 * 60 * 1000, TASK_FOREVER, &writeDebugFileTime);
 Task queryButtonTask(100, TASK_FOREVER, &queryButton);
 Task updateDisplayTask(DISPLAY_REFRESH, TASK_FOREVER, &updateDisplay);
 Task dataOutputTask(OUT_REFRESH, TASK_FOREVER, &dataOutput);
-Task resetPHCircuitTask(1, TASK_FOREVER, &resetPHCircuit);
 Task recordCycleTask(1000, 0, &recordCycle); // 1 second interval
 
 // Scheduler
@@ -199,24 +195,6 @@ void clearSpectrumDisplay() {
   last_time = millis();
   last_total = 0;  // Remove old values
 }
-
-
-void resetSampleHold(uint8_t time = 2) {  // Reset sample and hold circuit
-  digitalWriteFast(RST_PIN, HIGH);
-  delayMicroseconds(time);  // Discharge for (default) 2 µs -> ~99% discharge time for 1 kOhm and 470 pF
-  digitalWriteFast(RST_PIN, LOW);
-}
-
-
-void resetPHCircuit() {
-  if (!adc_lock) {
-    adc_lock = true;    // Disable interrupt ADC measurements while resetting
-    resetSampleHold();  // Periodically reset the S&H/P&H circuit
-    adc_lock = false;
-  }
-  // TODO: Check if adc was locked and decrease interval to compensate
-}
-
 
 void queryButton() {
   static uint16_t pressed = 0;
@@ -253,7 +231,6 @@ void queryButton() {
         conf.geiger_mode = !conf.geiger_mode;
         clearSpectrum();
         clearSpectrumDisplay();
-        resetSampleHold();
 
         println(conf.geiger_mode ? "Switched to geiger mode." : "Switched to energy measuring mode.");
 
@@ -563,7 +540,6 @@ void setMode(String *args) {
     println("Must be 'geiger' or 'energy'.", true);
     return;
   }
-  resetSampleHold();
   saveSettings();
 }
 
@@ -616,10 +592,6 @@ void deviceInfo([[maybe_unused]] String *args) {
   println("Used Heap Memory|" + String(rp2040.getUsedHeap() / 1000.0) + " kB / " + String(rp2040.getUsedHeap() * 100.0 / rp2040.getTotalHeap(), 0) + "%");
   println("Free Heap Memory|" + String(rp2040.getFreeHeap() / 1000.0) + " kB / " + String(rp2040.getFreeHeap() * 100.0 / rp2040.getTotalHeap(), 0) + "%");
   println("USB Connection|" + String(digitalRead(VBUS_MEAS)));
-
-  const float v = 3.0 * analogRead(VSYS_MEAS) * VREF_VOLTAGE / (ADC_BINS - 1);
-
-  println("Supply Voltage|" + String(round(v * 10.0) / 10.0, 1) + " V");
   println("Power Cycle Count|"+((power_cycle == 0) ? "n/a" : String(power_cycle)));
   println("Power-on hours|"+((power_on == 0) ? "n/a" : String(power_on)));
 
@@ -1090,43 +1062,25 @@ void startDMA() {
 void eventInt() {
   const unsigned long start = micros();
 
-  static uint8_t count = 0;
-  if (conf.enable_ticker) {
-    if (count >= conf.tick_rate - 1) {
-      tone(BUZZER_PIN, BUZZER_FREQ, BUZZER_TICK);
-      count = 0;
-    } else {
-      count++;
+  startDMA(); // Start new DMA transfer
+
+  // Wait for DMA to complete
+  while (dma_channel_is_busy(dma_chan));
+
+  // Find peak amplitude in ADC buffer
+  uint16_t peak = 0;
+  for (uint i = 0; i < NSAMPLES; i++) {
+    if (adc_buffer[i] > peak) {
+      peak = adc_buffer[i];
     }
   }
 
-  uint16_t mean = 0;
-
-  if (!conf.geiger_mode && !adc_lock) {
-
-    startDMA(); // Start new DMA transfer
-
-    // Wait for DMA to complete
-    while (dma_channel_is_busy(dma_chan));
-
-    // Find peak amplitude in ADC buffer
-    uint16_t peak = 0;
-    for (uint i = 0; i < NSAMPLES; i++) {
-      if (adc_buffer[i] > peak) {
-        peak = adc_buffer[i];
-      }
-    }
-    mean = peak;
-  }
-
-  spectrum[mean]++;
-  display_spectrum[mean]++;
+  spectrum[peak]++;
+  display_spectrum[peak]++;
 
   const unsigned long end = micros();
-  if (end >= start) {
-    total_events++;
-    dead_time.add(end - start);
-  }
+  total_events++;
+  dead_time.add(end - start);
 }
 
 /*
@@ -1136,18 +1090,15 @@ void setup() {
   pinMode(AMP_PIN, INPUT);
   //pinMode(ADC_PIN, INPUT);
   pinMode(INT_PIN, INPUT);
-  pinMode(RST_PIN, OUTPUT_12MA);
+  //pinMode(RST_PIN, OUTPUT_12MA);
   
   setupADC();
 
   dma_chan = dma_claim_unused_channel(true);
 
-    //gpio_set_slew_rate(RST_PIN, GPIO_SLEW_RATE_SLOW);  // Slow slew rate to reduce EMI
   gpio_set_slew_rate(LED, GPIO_SLEW_RATE_SLOW);  // Slow slew rate to reduce EMI
 
   analogReadResolution(ADC_RES);
-
-  resetSampleHold(5);  // Reset before enabling the interrupts to avoid jamming
 
   attachInterrupt(digitalPinToInterrupt(INT_PIN), eventInt, RISING);
 
@@ -1277,7 +1228,6 @@ void setup1() {
   updateDisplayTask.setSchedulingOption(TASK_INTERVAL);  // TASK_SCHEDULE, TASK_SCHEDULE_NC, TASK_INTERVAL
   dataOutputTask.setSchedulingOption(TASK_INTERVAL);
   queryButtonTask.setSchedulingOption(TASK_INTERVAL);
-  //resetPHCircuitTask.setSchedulingOption(TASK_INTERVAL);
   
   schedule.init();
   schedule.allowSleep(true);
@@ -1286,11 +1236,9 @@ void setup1() {
   schedule.addTask(queryButtonTask);
   schedule.addTask(updateDisplayTask);
   schedule.addTask(dataOutputTask);
-  //schedule.addTask(resetPHCircuitTask);
   schedule.addTask(recordCycleTask);
 
   queryButtonTask.enable();
-  //resetPHCircuitTask.enable();
   writeDebugFileTimeTask.enableDelayed(60 * 60 * 1000);
   dataOutputTask.enableDelayed(OUT_REFRESH);
   
