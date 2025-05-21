@@ -57,7 +57,6 @@ int dma_chan;
 #define SCREEN_WIDTH 128            // OLED display width, in pixels
 #define SCREEN_HEIGHT 64            // OLED display height, in pixels
 #define SCREEN_ADDRESS 0x3C         // See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
-#define BASELINE_NUM 101            // Number of measurements taken to determine the DC baseline
 #define CONFIG_FILE "/config.json"  // File to store the settings
 #define DEBUG_FILE "/debug.json"    // File to store some misc debug info
 #define DISPLAY_REFRESH 1000        // Milliseconds between display refreshs
@@ -76,13 +75,12 @@ struct Config {
   size_t meas_avg = NSAMPLES;     // Number of meas. averaged each event, higher=longer dead time
   bool enable_display = false;    // Enable I2C Display, see settings above
   bool enable_trng = false;       // Enable the True Random Number Generator
-  bool subtract_baseline = true;  // Subtract the DC bias from each pulse
   bool enable_ticker = false;     // Enable the buzzer to be used as a ticker for pulses
   size_t tick_rate = 20;          // Buzzer ticks once every tick_rate pulses
 
   // Do NOT modify the following operator function
   bool operator==(const Config &other) const {
-    return (tick_rate == other.tick_rate && enable_ticker == other.enable_ticker && ser_output == other.ser_output && geiger_mode == other.geiger_mode && print_spectrum == other.print_spectrum && meas_avg == other.meas_avg && enable_display == other.enable_display && enable_trng == other.enable_trng && subtract_baseline == other.subtract_baseline);
+    return (tick_rate == other.tick_rate && enable_ticker == other.enable_ticker && ser_output == other.ser_output && geiger_mode == other.geiger_mode && print_spectrum == other.print_spectrum && meas_avg == other.meas_avg && enable_display == other.enable_display && enable_trng == other.enable_trng);
   }
 };
 /*
@@ -122,11 +120,7 @@ volatile uint32_t display_spectrum[ADC_BINS];  // Holds the display histogram (s
 volatile unsigned long start_time = 0;   // Time in ms when the spectrum collection has started
 volatile unsigned long last_time = 0;    // Last time the display has been refreshed
 volatile uint32_t last_total = 0;        // Last total pulse count for display
-
 volatile size_t total_events = 0;               // Total number of all registered pulses
-
-RunningMedian baseline(BASELINE_NUM);  // Array of a number of baseline (DC bias) measurements at the SiPM input
-uint16_t current_baseline = 0;         // Median value of the input baseline voltage
 
 uint32_t recordingDuration = 0;        // Duration of the spectrum recording in seconds
 String recordingFile = "";             // Filename for the spectrum recording file
@@ -165,7 +159,6 @@ void writeDebugFileTime();
 void queryButton();
 void updateDisplay();
 void dataOutput();
-void updateBaseline();
 void resetPHCircuit();
 void recordCycle();
 
@@ -174,7 +167,6 @@ Task writeDebugFileTimeTask(60 * 60 * 1000, TASK_FOREVER, &writeDebugFileTime);
 Task queryButtonTask(100, TASK_FOREVER, &queryButton);
 Task updateDisplayTask(DISPLAY_REFRESH, TASK_FOREVER, &updateDisplay);
 Task dataOutputTask(OUT_REFRESH, TASK_FOREVER, &dataOutput);
-Task updateBaselineTask(1, TASK_FOREVER, &updateBaseline);
 Task resetPHCircuitTask(1, TASK_FOREVER, &resetPHCircuit);
 Task recordCycleTask(1000, 0, &recordCycle); // 1 second interval
 
@@ -314,46 +306,6 @@ void dataOutput() {
             clearSpectrumDisplay();
         }
         cleanPrintln("[" + String(new_total) + "]");
-      }
-    }
-  }
-}
-
-void updateBaseline() {
-  static uint8_t baseline_done = 0;
-
-  // Compute the median DC baseline to subtract from each pulse
-  if (conf.subtract_baseline) {
-    if (!adc_lock) {
-      adc_lock = true;  // Disable interrupt ADC measurements while resetting
-      
-      
-      startDMA(); // Start new DMA transfer
-
-      // Wait for DMA to complete
-      while (dma_channel_is_busy(dma_chan)) {
-        delay(1);
-      }
-
-      uint16_t sum = 0;
-
-      // Process and print ADC data
-      for (uint i = 0; i < NSAMPLES; i++) {
-        uint16_t v = adc_buffer[i];
-        sum += v;
-      }
-
-      adc_lock = false;
-
-      float avg = float(sum) / float(conf.meas_avg);
-      baseline.add(avg);
-
-      baseline_done++;
-
-      if (baseline_done >= BASELINE_NUM) {
-        current_baseline = round(baseline.getMedian());  // Take the median value
-
-        baseline_done = 0;
       }
     }
   }
@@ -615,24 +567,6 @@ void setMode(String *args) {
   saveSettings();
 }
 
-void toggleBaseline(String *args) {
-  String command = *args;
-  command.replace("set baseline", "");
-  command.trim();
-
-  if (command == "on") {
-    conf.subtract_baseline = true;
-  } else if (command == "off") {
-    conf.subtract_baseline = false;
-    current_baseline = 0;  // Reset baseline back to ze
-  } else {
-    println("Invalid input '" + command + "'.", true);
-    println("Must be 'on' or 'off'.", true);
-    return;
-  }
-  saveSettings();
-}
-
 
 void setMeasAveraging(String *args) {
   String command = *args;
@@ -875,9 +809,6 @@ Config loadSettings(bool msg = true) {
   if (doc["enable_trng"].is<bool>()) {
     new_conf.enable_trng = doc["enable_trng"];
   }
-  if (doc["subtract_baseline"].is<bool>()) {
-    new_conf.subtract_baseline = doc["subtract_baseline"];
-  }
   if (doc["enable_ticker"].is<bool>()) {
     new_conf.enable_ticker = doc["enable_ticker"];
   }
@@ -908,7 +839,6 @@ bool writeSettingsFile() {
   doc["meas_avg"] = conf.meas_avg;
   doc["enable_display"] = conf.enable_display;
   doc["enable_trng"] = conf.enable_trng;
-  doc["subtract_baseline"] = conf.subtract_baseline;
   doc["enable_ticker"] = conf.enable_ticker;
   doc["tick_rate"] = conf.tick_rate;
 
@@ -1124,19 +1054,17 @@ void setupADC() {
   adc_gpio_init(AIN_PIN);
   adc_select_input(ADC_CHANNEL);
 
-  // Set ADC clock to max speed (500k samples/sec at clkdiv = 0)
+  // Set sample rate
   adc_set_clkdiv(0);
 
   adc_fifo_setup(
-    true,   // Enable FIFO
-    true,   // Enable DMA request
-    1,      // DREQ on each sample
-    false,  // No error bit
-    false   // Don't shift to 8-bit
+    true,  // Enable FIFO
+    true,  // Enable DMA data request (DREQ)
+    1,     // DREQ threshold
+    false, false
   );
 
-  adc_fifo_drain();     // Ensure FIFO is clear
-  adc_run(false);       // Don't run until triggered
+  adc_run(true);
 }
 
 void startDMA() {
@@ -1146,18 +1074,17 @@ void startDMA() {
   channel_config_set_read_increment(&cfg, false);
   channel_config_set_write_increment(&cfg, true);
   channel_config_set_dreq(&cfg, DREQ_ADC);
-  channel_config_set_chain_to(&cfg, dma_chan); // Optional
+  channel_config_set_chain_to(&cfg, dma_chan);
 
   dma_channel_configure(
     dma_chan,
     &cfg,
-    adc_buffer,        // Destination
-    &adc_hw->fifo,     // Source
+    adc_buffer,        // Destination buffer
+    &adc_hw->fifo,     // Source: ADC FIFO
     NSAMPLES,
-    false              // Don't start yet
+    true               // Start immediately
   );
 }
-
 
 
 void eventInt() {
@@ -1177,24 +1104,10 @@ void eventInt() {
 
   if (!conf.geiger_mode && !adc_lock) {
 
-    // Reset DMA
-    dma_channel_abort(dma_chan);
-    adc_fifo_drain();    // Clear stale samples
-    adc_run(false);      // Ensure clean start
-
-    // Reconfigure DMA write pointer
-    dma_channel_set_write_addr(dma_chan, adc_buffer, false);
-    dma_channel_set_trans_count(dma_chan, NSAMPLES, false);
-    dma_channel_start(dma_chan);
-
-    // Start ADC NOW (after DMA armed)
-    adc_run(true);
-    adc_hw->cs |= ADC_CS_START_ONCE_BITS;
+    startDMA(); // Start new DMA transfer
 
     // Wait for DMA to complete
     while (dma_channel_is_busy(dma_chan));
-
-    adc_run(false);  // Stop ADC to avoid leftover data
 
     // Find peak amplitude in ADC buffer
     uint16_t peak = 0;
@@ -1203,15 +1116,11 @@ void eventInt() {
         peak = adc_buffer[i];
       }
     }
-
-    resetSampleHold();
     mean = peak;
   }
 
-  if ((conf.ser_output || conf.enable_display || isRecording)) {
-    spectrum[mean]++;
-    display_spectrum[mean]++;
-  }
+  spectrum[mean]++;
+  display_spectrum[mean]++;
 
   const unsigned long end = micros();
   if (end >= start) {
@@ -1276,7 +1185,6 @@ void setup1() {
     { readDirFS, "read dir", "Show contents of the data directory." },
     { readFileFS, "read file", "<filename> Print the contents of the file <filename> from the data directory." },
     { removeFileFS, "remove file", "<filename> Remove the file <filename> from the data directory." },
-    { toggleBaseline, "set baseline", "<toggle> Automatically subtract the DC bias (baseline) from each signal." },
     { toggleDisplay, "set display", "<toggle> Either 'on' or 'off' to enable or force disable OLED support." },
     { setMode, "set mode", "<mode> Either 'geiger' or 'energy' to disable or enable energy measurements. Geiger mode only counts pulses, but is a lot faster." },
     { setSerialOutMode, "set out", "<mode> Either 'events', 'spectrum' or 'off'. 'events' prints accumulated number of events as they arrive, 'spectrum' prints the accumulated histogram." },
@@ -1370,7 +1278,6 @@ void setup1() {
   dataOutputTask.setSchedulingOption(TASK_INTERVAL);
   queryButtonTask.setSchedulingOption(TASK_INTERVAL);
   //resetPHCircuitTask.setSchedulingOption(TASK_INTERVAL);
-  //updateBaselineTask.setSchedulingOption(TASK_INTERVAL);
   
   schedule.init();
   schedule.allowSleep(true);
@@ -1379,13 +1286,11 @@ void setup1() {
   schedule.addTask(queryButtonTask);
   schedule.addTask(updateDisplayTask);
   schedule.addTask(dataOutputTask);
-  schedule.addTask(updateBaselineTask);
-  schedule.addTask(resetPHCircuitTask);
+  //schedule.addTask(resetPHCircuitTask);
   schedule.addTask(recordCycleTask);
 
   queryButtonTask.enable();
-  resetPHCircuitTask.enable();
-  updateBaselineTask.enable();
+  //resetPHCircuitTask.enable();
   writeDebugFileTimeTask.enableDelayed(60 * 60 * 1000);
   dataOutputTask.enableDelayed(OUT_REFRESH);
   
