@@ -42,7 +42,7 @@
 #include "hardware/regs/adc.h"
 
 const uint ADC_CHANNEL = 1;      // ADC channel
-const uint NSAMPLES = 2;        // Number of samples per batch
+const uint NSAMPLES = 1;        // Number of samples per batch
 
 uint16_t adc_buffer[NSAMPLES];
 int dma_chan;
@@ -120,7 +120,7 @@ volatile uint32_t display_spectrum[ADC_BINS];  // Holds the display histogram (s
 volatile unsigned long start_time = 0;   // Time in ms when the spectrum collection has started
 volatile unsigned long last_time = 0;    // Last time the display has been refreshed
 volatile uint32_t last_total = 0;        // Last total pulse count for display
-volatile size_t total_events = 0;               // Total number of all registered pulses
+volatile uint32_t total_events = 0;               // Total number of all registered pulses
 
 uint32_t recordingDuration = 0;        // Duration of the spectrum recording in seconds
 String recordingFile = "";             // Filename for the spectrum recording file
@@ -582,6 +582,9 @@ void deviceInfo([[maybe_unused]] String *args) {
   println("Short Product Name|OGK");
   println("Runtime|" + String(millis() / 1000.0) + " s");
   println("Last Reset Reason|"+RESET_REASON_TEXT[rp2040.getResetReason()]);
+  for (uint16_t i = 0; i < ADC_BINS; i++) {
+      total_events += spectrum[i];
+  }
   println("Average Dead Time|"+((total_events == 0) ? "n/a" : String(round(avg_dt), 0) + " µs"));
 
   const float deadtime_frac = avg_dt * total_events / 1000.0 / float(millis()) * 100.0;
@@ -1062,24 +1065,28 @@ void startDMA() {
 void eventInt() {
   const unsigned long start = micros();
 
-  startDMA(); // Start new DMA transfer
+  // --- Start ADC on demand ---
+  adc_fifo_setup(true, true, 1, false, false);  // Re-init FIFO
+  adc_run(true);            // Start ADC
 
-  // Wait for DMA to complete
-  while (dma_channel_is_busy(dma_chan));
+  // --- Start DMA ---
+  startDMA();
+
+  // --- Wait for DMA to complete ---
+  dma_channel_wait_for_finish_blocking(dma_chan);
+
+  // --- Stop ADC ---
+  adc_run(false);           // Stop ADC now
+  adc_fifo_drain();         // Clear any remaining data
 
   // Find peak amplitude in ADC buffer
   uint16_t peak = 0;
-  for (uint i = 0; i < NSAMPLES; i++) {
-    if (adc_buffer[i] > peak) {
-      peak = adc_buffer[i];
-    }
-  }
+  peak = adc_buffer[0];
 
   spectrum[peak]++;
   display_spectrum[peak]++;
-
   const unsigned long end = micros();
-  total_events++;
+
   dead_time.add(end - start);
 }
 
