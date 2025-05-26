@@ -37,6 +37,16 @@
 #include <LittleFS.h>              // Used for FS, stores the settings and debug files
 #include <RunningMedian.h>         // Used to get running median and average with circular buffers
 
+#include "hardware/adc.h"
+#include "hardware/dma.h"
+#include "hardware/regs/adc.h"
+
+const uint ADC_CHANNEL = 1;      // ADC channel
+const uint NSAMPLES = 1;        // Number of samples per batch
+
+uint16_t adc_buffer[NSAMPLES];
+int dma_chan;
+
 /*
     ===================
     BEGIN USER SETTINGS
@@ -1022,15 +1032,62 @@ void resetSampleHold() {  // Reset sample and hold circuit
   digitalWriteFast(RST_PIN, LOW);
 }
 
+void setupADC() {
+  adc_init();
+  adc_gpio_init(AIN_PIN);
+  adc_select_input(ADC_CHANNEL);
+
+  // Set ADC clock to max speed (500k samples/sec at clkdiv = 0)
+  // Set sample rate
+  adc_set_clkdiv(0);
+
+  adc_fifo_setup(
+    true,  // Enable FIFO
+    true,  // Enable DMA data request (DREQ)
+    1,     // DREQ threshold
+    false, false
+  );
+
+  adc_fifo_drain();     // Ensure FIFO is clear
+  adc_run(false);       // Don't run until triggered
+  adc_run(true);
+}
+
+void startDMA() {
+  dma_channel_config cfg = dma_channel_get_default_config(dma_chan);
+
+  channel_config_set_transfer_data_size(&cfg, DMA_SIZE_16);
+  channel_config_set_read_increment(&cfg, false);
+  channel_config_set_write_increment(&cfg, true);
+  channel_config_set_dreq(&cfg, DREQ_ADC);
+  channel_config_set_chain_to(&cfg, dma_chan);
+
+  dma_channel_configure(
+    dma_chan,
+    &cfg,
+    adc_buffer,        // Destination buffer
+    &adc_hw->fifo,     // Source: ADC FIFO
+    NSAMPLES,
+    true               // Start immediately
+  );
+}
+
 
 void eventInt() {
-   const unsigned long start = micros();
-   uint16_t peak = analogRead(AIN_PIN);
-   resetSampleHold();
-   spectrum[peak]++;
-   display_spectrum[peak]++;
-   const unsigned long end = micros();
-   dead_time.add(end - start);
+  const unsigned long start = micros();
+   
+  startDMA(); // Start new DMA transfer
+
+  // Wait for DMA to complete
+  dma_channel_wait_for_finish_blocking(dma_chan);
+  // Find peak amplitude in ADC buffer
+  uint16_t peak = adc_buffer[0];
+
+  resetSampleHold();
+  spectrum[peak]++;
+  display_spectrum[peak]++;
+  const unsigned long end = micros();
+  dead_time.add(end - start);
 }
 
 /*
@@ -1042,12 +1099,16 @@ void setup() {
   pinMode(AIN_PIN, INPUT);
   pinMode(RST_PIN, OUTPUT_12MA);
 
+  setupADC();
+
+  dma_chan = dma_claim_unused_channel(true);
+
   gpio_set_slew_rate(LED, GPIO_SLEW_RATE_SLOW);  // Slow slew rate to reduce EMI
 
   analogReadResolution(ADC_RES);
   resetSampleHold();
 
-  attachInterrupt(digitalPinToInterrupt(INT_PIN), eventInt, FALLING);
+  attachInterrupt(digitalPinToInterrupt(INT_PIN), eventInt, RISING);
 
   start_time = millis();  // Spectrum pulse collection has started
 }
