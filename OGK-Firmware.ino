@@ -1029,6 +1029,7 @@ void drawGeigerCounts() {
 
 void resetSampleHold() {  // Reset sample and hold circuit
   digitalWriteFast(RST_PIN, HIGH);
+  delayMicroseconds(2);
   digitalWriteFast(RST_PIN, LOW);
 }
 
@@ -1080,12 +1081,12 @@ void eventInt() {
 
   // Wait for DMA to complete
   dma_channel_wait_for_finish_blocking(dma_chan);
+  digitalWriteFast(RST_PIN, HIGH);
   // Find peak amplitude in ADC buffer
   uint16_t peak = adc_buffer[0];
-
-  resetSampleHold();
   spectrum[peak]++;
   display_spectrum[peak]++;
+  digitalWriteFast(RST_PIN, LOW);
   const unsigned long end = micros();
   dead_time.add(end - start);
 }
