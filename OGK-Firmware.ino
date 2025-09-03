@@ -7,7 +7,7 @@
 
   2025, NuclearPhoenix and Vadym Vikulin. OpenGammaKit.
   https://github.com/OpenGammaProject/Open-Gamma-Detector
-  https://github.com/Vikulin/OpenGammaKit
+  https://github.com/vikulin/OpenGammaKit
   ## NOTE:
   ## Only change the highlighted USER SETTINGS below
   ## except you know exactly what you are doing!
@@ -36,16 +36,7 @@
 #include <ArduinoJson.h>           // Load and save the settings file
 #include <LittleFS.h>              // Used for FS, stores the settings and debug files
 #include <RunningMedian.h>         // Used to get running median and average with circular buffers
-
-#include "hardware/adc.h"
-#include "hardware/dma.h"
-#include "hardware/regs/adc.h"
-
-const uint ADC_CHANNEL = 1;      // ADC channel
-const uint NSAMPLES = 1;        // Number of samples per batch
-
-uint16_t adc_buffer[NSAMPLES];
-int dma_chan;
+#include <SPI.h>                   // Used for SiPM viltage regulator MCP41050
 
 /*
     ===================
@@ -65,6 +56,25 @@ int dma_chan;
 // Display Types: Select only one! One of them must be true and the other one false
 #define SCREEN_SH1106 false
 #define SCREEN_SSD1306 true
+// SPI command symbol
+#define CMD_WRITE 0x11
+#define CS_PIN   21        // CS = any GPIO
+#define SCK_PIN  22        // valid for SPI0
+#define MOSI_PIN 19        // valid for SPI0
+
+#define GND_PIN A2         // GND meas pin
+#define VSYS_MEAS A3       // VSYS/3
+#define VBUS_MEAS 24       // VBUS Sense Pin
+#define PS_PIN 23          // SMPS power save pin
+
+// Pin configuration
+#define INT_PIN 18         // Interruption input
+#define PD_PIN  17         // Shutdown input for MAX1422. HIGH level places the ADC into shutdown mode.
+#define CLK_PIN 16         // Clock output to MAX1422
+#define DATA_MASK 0x0FFF   // GPIO0–11 mask (12-bit)
+
+#define LED 25             // Built-in LED on GP25
+#define BUTTON_PIN 14      // Misc button pin
 
 struct Config {
   // These are the default settings that can also be changes via the serial commands
@@ -77,36 +87,25 @@ struct Config {
   bool enable_trng = false;       // Enable the True Random Number Generator
   bool enable_ticker = false;     // Enable the buzzer to be used as a ticker for pulses
   size_t tick_rate = 20;          // Buzzer ticks once every tick_rate pulses
+  size_t pot_value = 80;          // SiPM voltage 29.6V corresponds 80 pot value
 
   // Do NOT modify the following operator function
   bool operator==(const Config &other) const {
     return (tick_rate == other.tick_rate && enable_ticker == other.enable_ticker && ser_output == other.ser_output && geiger_mode == other.geiger_mode && print_spectrum == other.print_spectrum && meas_avg == other.meas_avg && enable_display == other.enable_display && enable_trng == other.enable_trng);
   }
 };
+
+SPISettings spisettings(1000000, MSBFIRST, SPI_MODE0);
 /*
     =================
     END USER SETTINGS
     =================
 */
 
-const String FW_VERSION = "2.0.1";  // Firmware Version Code
-
-const uint8_t GND_PIN = A2;    // GND meas pin
-const uint8_t VSYS_MEAS = A3;  // VSYS/3
-const uint8_t VBUS_MEAS = 24;  // VBUS Sense Pin
-const uint8_t PS_PIN = 23;     // SMPS power save pin
-
-const uint8_t AIN_PIN = A1;     // Analog input pin
-const uint8_t AMP_PIN = A0;     // Preamp (baseline) meas pin
-const uint8_t INT_PIN = 18;     // Signal interrupt pin
-const uint8_t RST_PIN = 22;     // Peak detector MOSFET reset pin
-const uint8_t LED = 25;         // Built-in LED on GP25
-const uint8_t BUZZER_PIN = 7;   // Buzzer PWM pin for the ticker
-const uint8_t BUTTON_PIN = 14;  // Misc button pin
+const String FW_VERSION = "3.0.0";  // Firmware Version Code
 
 const uint8_t LONG_PRESS = 10;  // Time until considered long button press
 
-const uint8_t BUZZER_TICK = 10;     // On-time of the buzzer for a single pulse in ms
 const uint16_t EVT_RESET_C = 3000;  // Number of counts after which the OLED stats will be reset
 const uint16_t OUT_REFRESH = 1000;  // Milliseconds between serial data outputs
 
@@ -234,7 +233,6 @@ void queryButton() {
         conf.geiger_mode = !conf.geiger_mode;
         clearSpectrum();
         clearSpectrumDisplay();
-        resetSampleHold();
 
         println(conf.geiger_mode ? "Switched to geiger mode." : "Switched to energy measuring mode.");
 
@@ -544,7 +542,6 @@ void setMode(String *args) {
     println("Must be 'geiger' or 'energy'.", true);
     return;
   }
-  resetSampleHold();
   saveSettings();
 }
 
@@ -1027,93 +1024,97 @@ void drawGeigerCounts() {
   END DISPLAY FUNCTIONS
 */
 
-void resetSampleHold() {  // Reset sample and hold circuit
-  digitalWriteFast(RST_PIN, HIGH);
-  delayMicroseconds(2);
-  digitalWriteFast(RST_PIN, LOW);
-}
 
 void setupADC() {
-  adc_init();
-  adc_gpio_init(AIN_PIN);
-  adc_select_input(ADC_CHANNEL);
+  // Setup ADC shutdown pin
+  pinMode(PD_PIN, OUTPUT);
+  digitalWrite(PD_PIN, LOW);
 
-  // Set ADC clock to max speed (500k samples/sec at clkdiv = 0)
-  // Set sample rate
-  adc_set_clkdiv(0);
+  //Int pin
+  pinMode(INT_PIN, INPUT);
+  // Configure CLK pin
+  pinMode(CLK_PIN, OUTPUT);
+  gpio_put(CLK_PIN, LOW);
 
-  adc_fifo_setup(
-    true,  // Enable FIFO
-    true,  // Enable DMA data request (DREQ)
-    1,     // DREQ threshold
-    false, false
-  );
-
-  adc_fifo_drain();     // Ensure FIFO is clear
-  adc_run(false);       // Don't run until triggered
-  adc_run(true);
+  // Configure GPIO0–11 as inputs
+  for (int i = 0; i <= 11; i++) {
+    pinMode(i, INPUT);
+    gpio_disable_pulls(i);
+  }
 }
-
-void startDMA() {
-  dma_channel_config cfg = dma_channel_get_default_config(dma_chan);
-
-  channel_config_set_transfer_data_size(&cfg, DMA_SIZE_16);
-  channel_config_set_read_increment(&cfg, false);
-  channel_config_set_write_increment(&cfg, true);
-  channel_config_set_dreq(&cfg, DREQ_ADC);
-  channel_config_set_chain_to(&cfg, dma_chan);
-
-  dma_channel_configure(
-    dma_chan,
-    &cfg,
-    adc_buffer,        // Destination buffer
-    &adc_hw->fifo,     // Source: ADC FIFO
-    NSAMPLES,
-    true               // Start immediately
-  );
-}
-
 
 void eventInt() {
   const unsigned long start = micros();
-   
-  startDMA(); // Start new DMA transfer
-
-  // Wait for DMA to complete
-  dma_channel_wait_for_finish_blocking(dma_chan);
-  digitalWriteFast(RST_PIN, HIGH);
-  // Find peak amplitude in ADC buffer
-  uint16_t peak = adc_buffer[0];
-  spectrum[peak]++;
-  display_spectrum[peak]++;
-  digitalWriteFast(RST_PIN, LOW);
+  int16_t sample = readADC();
+  if(sample>0){
+    spectrum[sample]++;
+    display_spectrum[sample]++;
+  }
   const unsigned long end = micros();
   dead_time.add(end - start);
+}
+
+uint16_t readRawADC() {
+  // Rising edge of CLK latches ADC output
+  gpio_put(CLK_PIN, HIGH);
+  delay_50ns();
+
+  // Read GPIO0–11
+  uint16_t value = sio_hw->gpio_in & DATA_MASK;
+
+  // Falling edge
+  gpio_put(CLK_PIN, LOW);
+  delay_50ns();
+
+  return value;
+}
+
+int16_t readADC() {
+  uint16_t raw = readRawADC();
+
+  // Convert offset binary → signed (-2048 to +2047)
+  int16_t signedVal = (int16_t)raw - 2048;
+
+  return signedVal;
+}
+
+inline void delay_50ns() {
+  asm volatile ("nop\n nop\n nop\n nop\n nop\n nop\n nop\n");
 }
 
 /*
   BEGIN SETUP FUNCTIONS
 */
 void setup() {
-  pinMode(AMP_PIN, INPUT);
-  pinMode(INT_PIN, INPUT);
-  pinMode(AIN_PIN, INPUT);
-  pinMode(RST_PIN, OUTPUT_12MA);
+
+  pinMode(CS_PIN, OUTPUT);
+  //SPI.setRX(0);
+  SPI.setCS(CS_PIN);
+  SPI.setSCK(SCK_PIN);
+  SPI.setTX(MOSI_PIN);
+  SPI.begin(true);
+  // Set 29.6V
+  setPot(conf.pot_value);
 
   setupADC();
 
-  dma_chan = dma_claim_unused_channel(true);
-
   gpio_set_slew_rate(LED, GPIO_SLEW_RATE_SLOW);  // Slow slew rate to reduce EMI
-
-  analogReadResolution(ADC_RES);
-  resetSampleHold();
 
   attachInterrupt(digitalPinToInterrupt(INT_PIN), eventInt, RISING);
 
   start_time = millis();  // Spectrum pulse collection has started
 }
 
+void setPot(uint8_t value) {
+  // MCP41050 expects two bytes: command + value
+  digitalWrite(CS_PIN, LOW);
+  SPI.beginTransaction(spisettings);
+  SPI.transfer(CMD_WRITE);
+  SPI.transfer(value);
+  SPI.endTransaction();
+  delay(500);
+  digitalWrite(CS_PIN, HIGH);
+}
 
 void setup1() {
   rp2040.wdt_begin(5000);  // Enable hardware watchdog to check every 5s
@@ -1178,23 +1179,6 @@ void setup1() {
 
   // Disable unused UART0
   Serial1.end();
-  // Set the correct SPI pins
-  SPI.setRX(0);
-  SPI.setTX(3);
-  SPI.setSCK(2);
-  SPI.setCS(1);
-  // I2C pins are 4 and 5 by default
-  // Set the correct UART pins
-  Serial2.setRX(9);
-  Serial2.setTX(8);
-
-  // Set up buzzer
-  pinMode(BUZZER_PIN, OUTPUT_12MA);
-  gpio_set_slew_rate(BUZZER_PIN, GPIO_SLEW_RATE_SLOW);  // Slow slew rate to reduce EMI
-  //pinMode(7, OUTPUT);  // Set GPIO 7 as output
-  //gpio_set_drive_strength(7, GPIO_DRIVE_STRENGTH_12MA); // Set drive strength to 12mA
-  
-  digitalWrite(BUZZER_PIN, LOW);
 
   shell.begin(2000000);
   shell1.begin(2000000);
