@@ -116,6 +116,10 @@ const uint16_t ADC_BINS = 0x01 << ADC_RES;  // Number of ADC bins
 volatile uint32_t spectrum[ADC_BINS];          // Holds the output histogram (spectrum)
 volatile uint32_t display_spectrum[ADC_BINS];  // Holds the display histogram (spectrum)
 
+// Global variables for ADC sampling
+volatile int16_t adcSamples[7];                // Buffer for 7 ADC samples
+volatile bool adcSamplingRequested = false;    // Flag to request ADC sampling
+
 volatile unsigned long start_time = 0;   // Time in ms when the spectrum collection has started
 volatile unsigned long last_time = 0;    // Last time the display has been refreshed
 volatile uint32_t last_total = 0;        // Last total pulse count for display
@@ -1045,11 +1049,33 @@ void setupADC() {
 
 void eventInt() {
   const unsigned long start = micros();
-  int16_t sample = readADC();
-  if(sample>0){
+  
+  // Request ADC sampling
+  adcSamplingRequested = true;
+  
+  // Wait for ADC sampling to complete (with timeout)
+  unsigned long timeout = micros() + 1000; // 1ms timeout
+  while (adcSamplingRequested && micros() < timeout) {
+    // Wait for ADC sampling to complete
+  }
+  
+  // Process the 7 collected samples
+  int16_t maxVal = adcSamples[0];
+  int16_t minVal = adcSamples[0];
+  
+  for (int i = 1; i < 7; i++) {
+    if (adcSamples[i] > maxVal) maxVal = adcSamples[i];
+    if (adcSamples[i] < minVal) minVal = adcSamples[i];
+  }
+  
+  // Calculate pulse amplitude
+  int16_t sample = maxVal - minVal;
+  
+  if (sample > 0) {
     spectrum[sample]++;
     display_spectrum[sample]++;
   }
+  
   const unsigned long end = micros();
   dead_time.add(end - start);
 }
@@ -1057,14 +1083,14 @@ void eventInt() {
 uint16_t readRawADC() {
   // Rising edge of CLK latches ADC output
   gpio_put(CLK_PIN, HIGH);
-  delay_50ns();
+  delay_20ns();
 
   // Read GPIO0–11
   uint16_t value = sio_hw->gpio_in & DATA_MASK;
 
   // Falling edge
   gpio_put(CLK_PIN, LOW);
-  delay_50ns();
+  delay_20ns();
 
   return value;
 }
@@ -1080,6 +1106,10 @@ int16_t readADC() {
 
 inline void delay_50ns() {
   asm volatile ("nop\n nop\n nop\n nop\n nop\n nop\n nop\n");
+}
+
+inline void delay_20ns() {
+  asm volatile ("nop\n nop\n nop\n");
 }
 
 /*
@@ -1251,7 +1281,17 @@ void setup1() {
   BEGIN LOOP FUNCTIONS
 */
 void loop() {
-  __wfi();  // Wait for interrupt
+  // ADC sampling loop - collects samples when requested
+  while (true) {
+    if (adcSamplingRequested) {
+      // Collect 7 samples for the current interrupt
+      for (int i = 0; i < 7; i++) {
+        adcSamples[i] = readADC();
+      }
+      adcSamplingRequested = false;
+    }
+    __wfi();  // Wait for interrupt
+  }
 }
 
 
