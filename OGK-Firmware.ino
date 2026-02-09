@@ -1086,9 +1086,10 @@ void eventInt() {
   uint16_t peak = adc_buffer[0];
   spectrum[peak]++;
   display_spectrum[peak]++;
-  digitalWriteFast(RST_PIN, LOW);
   const unsigned long end = micros();
   dead_time.add(end - start);
+  delay(1);
+  digitalWriteFast(RST_PIN, LOW);
 }
 
 /*
