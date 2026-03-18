@@ -1088,8 +1088,7 @@ void eventInt() {
   display_spectrum[peak]++;
   const unsigned long end = micros();
   dead_time.add(end - start);
-  delay(1);
-  digitalWriteFast(RST_PIN, LOW);
+  resetSampleHold();
 }
 
 /*
